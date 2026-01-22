@@ -1,0 +1,26 @@
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.1.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.1.0 http://maven.apache.org/xsd/assembly-2.1.0.xsd">
+  <id>fatjar</id>
+  <formats>
+    <format>jar</format> <!-- 最终输出为 jar 格式 -->
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+  
+  <!-- 1. 项目自身的类和资源（放到根目录或 classes/ 目录） -->
+  <fileSets>
+    <fileSet>
+      <directory>${project.build.outputDirectory}</directory>
+      <outputDirectory>/</outputDirectory> <!-- 自身类直接放在 jar 根目录 -->
+    </fileSet>
+  </fileSets>
+  
+  <!-- 2. 依赖 jar 打包到 lib/ 目录（保持完整 jar 结构） -->
+  <dependencySets>
+    <dependencySet>
+      <outputDirectory>/lib</outputDirectory> <!-- 依赖 jar 放在 lib 目录 -->
+      <useProjectArtifact>false</useProjectArtifact> <!-- 排除项目自身 jar -->
+      <unpack>false</unpack> <!-- 关键：不解压依赖 jar，保持完整 -->
+    </dependencySet>
+  </dependencySets>
+</assembly>
