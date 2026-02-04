@@ -2,9 +2,8 @@ package com.ecat.integration.ModbusIntegration.Attribute;
 
 import java.util.function.Function;
 
-import com.ecat.core.State.AttributeBase;
+import com.ecat.core.State.NumberAttribute;
 import com.ecat.core.State.AttributeClass;
-import com.ecat.core.State.AttributeType;
 import com.ecat.core.State.UnitInfo;
 import com.ecat.core.State.AttrChangedCallbackParams;
 import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
@@ -26,7 +25,7 @@ import com.ecat.integration.ModbusIntegration.ModbusSource;
  *
  * @Author coffee
  */
-public abstract class ModbusNumericAttributeBase<T extends Number & Comparable<T>> extends AttributeBase<T> {
+public abstract class ModbusNumericAttributeBase<T extends Number & Comparable<T>> extends NumberAttribute<T> {
 
     protected ModbusSource modbusSource; // Modbus源
 
@@ -163,10 +162,5 @@ public abstract class ModbusNumericAttributeBase<T extends Number & Comparable<T
         // Modbus数值属性默认不限制验证范围
         // 子类可以根据需要重写此方法添加特定的验证规则
         return null;
-    }
-
-    @Override
-    public AttributeType getAttributeType() {
-        return AttributeType.NUMERIC;
     }
 }

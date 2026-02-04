@@ -237,4 +237,9 @@ public class ModbusScalableFloatDRAttribute extends ModbusNumericAttributeBase<F
             return value;
         }
     }
+
+    @Override
+    protected Float convertToType(double value) {
+        return (float) value;
+    }
 }

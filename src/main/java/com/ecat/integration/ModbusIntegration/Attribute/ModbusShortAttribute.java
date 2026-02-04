@@ -149,4 +149,9 @@ public class ModbusShortAttribute extends ModbusNumericAttributeBase<Short> {
             return value;
         }
     }
+
+    @Override
+    protected Short convertToType(double value) {
+        return (short) value;
+    }
 }

@@ -153,4 +153,9 @@ public class ModbusFloatAttribute extends ModbusNumericAttributeBase<Float> {
             return value;
         }
     }
+
+    @Override
+    protected Float convertToType(double value) {
+        return (float) value;
+    }
 }
