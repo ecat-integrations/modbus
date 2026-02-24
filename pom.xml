@@ -8,7 +8,7 @@
         <relativePath />
     </parent>
     <artifactId>integration-modbus</artifactId>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
     <name>integration-modbus</name>
     <repositories>
         <repository>

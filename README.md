@@ -26,6 +26,12 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TC
 - **参数验证**: 配置参数自动验证，确保参数有效性
 - **默认值**: 提供合理的默认配置值
 
+### 🖥️ Slave 服务
+- **回调模式**: 通过回调接口处理外部 Master 的读写请求
+- **协议完整**: 支持全部 8 个标准功能码（01-04 读，05-06 单写，15-16 批量写）
+- **双模式**: 同时支持 TCP Slave 和 Serial RTU Slave
+- **设计文档**: [Modbus Slave 设计文档](docs/plans/2026-02-24-modbus-slave-design.md)
+
 ## 架构设计
 
 ### 核心组件
@@ -61,6 +67,15 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TC
 - **ModbusInfo**: 抽象基类，定义公共属性
 - **ModbusTcpInfo**: TCP 连接信息（IP、端口、slaveId）
 - **ModbusSerialInfo**: 串行连接信息（串口、波特率、数据位等）
+
+#### 6. Modbus Slave 服务组件
+允许外部 Modbus Master 读写本系统数据：
+
+- **ModbusSlaveRegistry**: Slave 服务注册管理中心
+- **ModbusSlaveServer**: 支持 TCP 和 Serial RTU 的 Slave 服务
+- **ModbusDataCallback**: 数据回调接口，用户实现此接口处理读写请求
+- **CallbackProcessImage**: 将 Modbus4J 请求转发给回调接口
+- **ModbusTcpSlaveConfig / ModbusSerialSlaveConfig**: Slave 配置类
 
 ## 使用场景
 
@@ -433,9 +448,9 @@ Runtime.getRuntime().addShutdownHook(new Thread(() -> {
 - **Modbus4J**: 开源的 Modbus 通信库
   ```xml
   <dependency>
-      <groupId>com.infiniteautomation</groupId>
+      <groupId>com.github.tusky2015</groupId>
       <artifactId>modbus4j</artifactId>
-      <version>3.0.6</version>
+      <version>v3.1.9</version>
   </dependency>
   ```
 
@@ -480,19 +495,17 @@ Logger.getLogger(ModbusIntegration.class.getName()).setLevel(Level.FINE);
 
 ## 版本历史
 
+### v1.1.0
+- 新增 Modbus Slave 服务功能
+- 支持 TCP Slave 和 Serial RTU Slave
+- 实现全部 8 个标准功能码（01-04 读，05-06 单写，15-16 批量写）
+- 提供回调模式接口 `ModbusDataCallback`
+
 ### v1.0.0
 - 初始版本发布
 - 支持 Modbus TCP 和串行协议
 - 实现连接复用和并发控制
 - 提供完整的异步操作接口
-
-## 贡献指南
-
-欢迎提交 Issue 和 Pull Request 来改进此模块：
-
-1. **Bug 报告**: 请提供详细的复现步骤和环境信息
-2. **功能请求**: 描述使用场景和期望行为
-3. **代码贡献**: 请遵循现有的代码风格和测试覆盖要求
 
 ## 许可证
 

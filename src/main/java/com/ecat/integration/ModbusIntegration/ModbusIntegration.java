@@ -5,6 +5,9 @@ import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.DynamicConfig.ConfigItem;
 import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
 import com.ecat.core.Utils.DynamicConfig.IntegerValidator;
+import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveConfig;
+import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveRegistry;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -22,8 +25,9 @@ import java.util.Map;
  * @author coffee
  */
 public class ModbusIntegration extends IntegrationBase {
-    private final Map<String, ModbusSource> tcpSources = new HashMap<>(); // TCP资源池
-    private final Map<String, ModbusSource> serialSources = new HashMap<>();// 串行资源池
+    private final Map<String, ModbusSource> tcpSources = new HashMap<>();
+    private final Map<String, ModbusSource> serialSources = new HashMap<>();
+    private final ModbusSlaveRegistry slaveRegistry = new ModbusSlaveRegistry();
 
     protected ConfigDefinition configDefinition;
 
@@ -58,12 +62,11 @@ public class ModbusIntegration extends IntegrationBase {
 
     @Override
     public void onRelease() {
-        // 暂停所有资源
         tcpSources.values().forEach(ModbusSource::closeModbus);
         serialSources.values().forEach(ModbusSource::closeModbus);
-        // 释放所有资源
         tcpSources.clear();
         serialSources.clear();
+        slaveRegistry.clear();
     }
 
     public ConfigDefinition getConfigDefinition() {
@@ -147,5 +150,61 @@ public class ModbusIntegration extends IntegrationBase {
      */
     public ModbusSource getSerialSource(String identity) {
         return serialSources.get(identity);
+    }
+
+    // ==================== Slave API ====================
+
+    /**
+     * 注册 Slave 服务
+     * 
+     * @param config Slave 配置
+     */
+    public void registerSlave(ModbusSlaveConfig config) {
+        slaveRegistry.register(config);
+    }
+
+    /**
+     * 注销 Slave 服务
+     * 
+     * @param connectionId 连接标识
+     * @param slaveId 从站ID
+     */
+    public void unregisterSlave(String connectionId, int slaveId) {
+        slaveRegistry.unregister(connectionId, slaveId);
+    }
+
+    /**
+     * 启动 Slave 服务
+     * 
+     * @param connectionId 连接标识
+     * @param slaveId 从站ID
+     */
+    public void startSlave(String connectionId, int slaveId) {
+        try {
+            slaveRegistry.start(connectionId, slaveId);
+        } catch (Exception e) {
+            log.error("Failed to start slave: {}", e.getMessage());
+            throw new RuntimeException("Failed to start slave", e);
+        }
+    }
+
+    /**
+     * 停止 Slave 服务
+     * 
+     * @param connectionId 连接标识
+     * @param slaveId 从站ID
+     */
+    public void stopSlave(String connectionId, int slaveId) {
+        slaveRegistry.stop(connectionId, slaveId);
+    }
+
+    /**
+     * 检查 Slave 服务是否运行中
+     * 
+     * @param connectionId 连接标识
+     * @return 是否运行中
+     */
+    public boolean isSlaveRunning(String connectionId) {
+        return slaveRegistry.isRunning(connectionId);
     }
 }
