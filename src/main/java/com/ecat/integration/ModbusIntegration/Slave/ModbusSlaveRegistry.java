@@ -5,8 +5,9 @@
  */
 package com.ecat.integration.ModbusIntegration.Slave;
 
+import com.ecat.core.Utils.Log;
+import com.ecat.core.Utils.LogFactory;
 import com.serotonin.modbus4j.exception.ModbusInitException;
-import lombok.extern.java.Log;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,8 +56,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see ModbusSlaveServer
  * @see ModbusSlaveConfig
  */
-@Log
 public class ModbusSlaveRegistry {
+    private final Log log = LogFactory.getLogger(getClass());
     private final Map<String, ModbusSlaveServer> serverMap = new ConcurrentHashMap<>();
 
     public void register(ModbusSlaveConfig config) {
@@ -78,7 +79,7 @@ public class ModbusSlaveRegistry {
     public void unregister(String connectionId, int slaveId) {
         ModbusSlaveServer server = serverMap.get(connectionId);
         if (server == null) {
-            log.warning("Server not found for connectionId: " + connectionId);
+            log.warn("Server not found for connectionId: " + connectionId);
             return;
         }
 
@@ -98,7 +99,7 @@ public class ModbusSlaveRegistry {
     public void stop(String connectionId, int slaveId) {
         ModbusSlaveServer server = serverMap.get(connectionId);
         if (server == null) {
-            log.warning("Server not found for connectionId: " + connectionId);
+            log.warn("Server not found for connectionId: " + connectionId);
             return;
         }
         server.stop();

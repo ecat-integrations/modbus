@@ -5,6 +5,8 @@
  */
 package com.ecat.integration.ModbusIntegration.Slave;
 
+import com.ecat.core.Utils.Log;
+import com.ecat.core.Utils.LogFactory;
 import com.ecat.integration.ModbusIntegration.ModbusProtocol;
 import com.ecat.integration.ModbusIntegration.ModbusSerialInfo;
 import com.ecat.integration.ModbusIntegration.ModbusSerialPortWrapper;
@@ -13,7 +15,6 @@ import com.serotonin.modbus4j.ModbusSlaveSet;
 import com.serotonin.modbus4j.exception.ModbusInitException;
 import com.serotonin.modbus4j.ip.tcp.TcpSlave;
 import com.serotonin.modbus4j.serial.SerialPortWrapper;
-import lombok.extern.java.Log;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,8 +60,8 @@ import java.util.concurrent.Executors;
  * @see ModbusSlaveConfig
  * @see CallbackProcessImage
  */
-@Log
 public class ModbusSlaveServer {
+    private final Log log = LogFactory.getLogger(getClass());
     private final ModbusSlaveConfig config;
     private ModbusSlaveSet slaveSet;
     private final Map<Integer, CallbackProcessImage> processImageMap = new ConcurrentHashMap<>();
@@ -86,7 +87,7 @@ public class ModbusSlaveServer {
 
     public synchronized void start() throws ModbusInitException {
         if (running) {
-            log.warning("Slave server is already running: " + config.getConnectionIdentity());
+            log.warn("Slave server is already running: " + config.getConnectionIdentity());
             return;
         }
 
@@ -113,7 +114,7 @@ public class ModbusSlaveServer {
                 log.info("Starting slave server in background thread...");
                 slaveSet.start();
             } catch (ModbusInitException e) {
-                log.severe("Failed to start slave server: " + e.getMessage());
+                log.error("Failed to start slave server: " + e.getMessage());
                 running = false;
             }
         });
@@ -159,7 +160,7 @@ public class ModbusSlaveServer {
                 slaveSet.stop();
                 log.info("Modbus Slave server stopped: " + config);
             } catch (Exception e) {
-                log.warning("Error stopping slave server: " + e.getMessage());
+                log.warn("Error stopping slave server: " + e.getMessage());
             }
             slaveSet = null;
         }

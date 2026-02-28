@@ -51,11 +51,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import com.ecat.core.Utils.Log;
+import com.ecat.core.Utils.LogFactory;
 
 public class ModbusSource {
-    private static final Logger log = Logger.getLogger(ModbusSource.class.getName());
+    private final Log log = LogFactory.getLogger(getClass());
     private final Lock lock = new ReentrantLock();
     private final Condition condition = lock.newCondition();
     @Getter
@@ -96,7 +96,7 @@ public class ModbusSource {
                 ReadCoilsRequest request = new ReadCoilsRequest(slaveId, startAddress, numberOfBits);
                 return (ReadCoilsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reading coils. slaveId: " + slaveId +
+                log.error( "Error reading coils. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits + ")", e);
                 return null;
             }
@@ -109,7 +109,7 @@ public class ModbusSource {
                 ReadDiscreteInputsRequest request = new ReadDiscreteInputsRequest(slaveId, startAddress, numberOfBits);
                 return (ReadDiscreteInputsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reading discrete inputs. slaveId: " + slaveId +
+                log.error( "Error reading discrete inputs. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits + ")", e);
                 return null;
             }
@@ -122,7 +122,7 @@ public class ModbusSource {
                 ReadExceptionStatusRequest request = new ReadExceptionStatusRequest(slaveId);
                 return (ReadExceptionStatusResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reading exception status. slaveId: " + slaveId, e);
+                log.error( "Error reading exception status. slaveId: " + slaveId, e);
                 return null;
             }
         }, executor);
@@ -134,7 +134,7 @@ public class ModbusSource {
                 ReadHoldingRegistersRequest request = new ReadHoldingRegistersRequest(slaveId, startAddress, numberOfRegisters);
                 return (ReadHoldingRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reading holding registers. slaveId: " + slaveId +
+                log.error( "Error reading holding registers. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters + ")", e);
                 return null;
             }
@@ -147,7 +147,7 @@ public class ModbusSource {
                 ReadInputRegistersRequest request = new ReadInputRegistersRequest(slaveId, startAddress, numberOfRegisters);
                 return (ReadInputRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reading input registers. slaveId: " + slaveId +
+                log.error( "Error reading input registers. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters + ")", e);
                 return null;
             }
@@ -160,7 +160,7 @@ public class ModbusSource {
                 ReportSlaveIdRequest request = new ReportSlaveIdRequest(slaveId);
                 return (ReportSlaveIdResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error reporting slave ID. slaveId: " + slaveId, e);
+                log.error( "Error reporting slave ID. slaveId: " + slaveId, e);
                 return null;
             }
         }, executor);
@@ -172,7 +172,7 @@ public class ModbusSource {
                 WriteCoilRequest request = new WriteCoilRequest(slaveId, address, value);
                 return (WriteCoilResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error writing coil. slaveId: " + slaveId +
+                log.error( "Error writing coil. slaveId: " + slaveId +
                         " (address: " + address + ", value: " + value + ")", e);
                 return null;
             }
@@ -185,7 +185,7 @@ public class ModbusSource {
                 WriteCoilsRequest request = new WriteCoilsRequest(slaveId, startAddress, values);
                 return (WriteCoilsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error writing coils. slaveId: " + slaveId +
+                log.error( "Error writing coils. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) + ")", e);
                 return null;
             }
@@ -198,7 +198,7 @@ public class ModbusSource {
                 WriteMaskRegisterRequest request = new WriteMaskRegisterRequest(slaveId, address, andMask, orMask);
                 return (WriteMaskRegisterResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error writing mask register. slaveId: " + slaveId +
+                log.error( "Error writing mask register. slaveId: " + slaveId +
                         " (address: " + address + ", andMask: " + andMask + ", orMask: " + orMask + ")", e);
                 return null;
             }
@@ -211,7 +211,7 @@ public class ModbusSource {
                 WriteRegisterRequest request = new WriteRegisterRequest(slaveId, address, value);
                 return (WriteRegisterResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error writing register. slaveId: " + slaveId +
+                log.error( "Error writing register. slaveId: " + slaveId +
                         " (address: " + address + ", value: " + value + ")", e);
                 return null;
             }
@@ -224,7 +224,7 @@ public class ModbusSource {
                 WriteRegistersRequest request = new WriteRegistersRequest(slaveId, startAddress, values);
                 return (WriteRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.log(Level.SEVERE, "Error writing registers. slaveId: " + slaveId +
+                log.error( "Error writing registers. slaveId: " + slaveId +
                         " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) + ")", e);
                 return null;
             }
@@ -305,20 +305,20 @@ public class ModbusSource {
             if (currentKey == null) {
                 // 直接获取锁
                 currentKey = requestKey;
-                log.log(Level.INFO, "Lock acquired: " + requestKey);
+                log.info( "Lock acquired: " + requestKey);
                 return requestKey;
             } else {
                 // 检查等待队列是否未满
                 if (waitQueue.size() < maxWaiters) {
                     waitQueue.add(requestKey);
-                    log.log(Level.INFO, "Enter wait queue: " + requestKey + ", queue size: " + waitQueue.size());
+                    log.info( "Enter wait queue: " + requestKey + ", queue size: " + waitQueue.size());
                     boolean isAwoken = false;
                     try {
                         // 等待唤醒或超时
                         isAwoken = condition.await(timeout, unit);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt(); // 恢复中断状态
-                        log.log(Level.SEVERE, "Wait interrupted: " + requestKey + ", modbusInfo: " + modbusInfo.toString(), e);
+                        log.error( "Wait interrupted: " + requestKey + ", modbusInfo: " + modbusInfo.toString(), e);
                         waitQueue.remove(requestKey); // 从队列移除
                         return null;
                     }
@@ -328,10 +328,10 @@ public class ModbusSource {
                         if (waitQueue.peek() != null && waitQueue.peek().equals(requestKey)) {
                             currentKey = requestKey;
                             waitQueue.poll();
-                            log.log(Level.INFO, "Lock acquired after waiting: " + requestKey);
+                            log.info( "Lock acquired after waiting: " + requestKey);
                             return requestKey;
                         } else {
-                            log.log(Level.INFO, "Wait queue changed, skip acquisition: " + requestKey);
+                            log.info( "Wait queue changed, skip acquisition: " + requestKey);
                             return null;
                         }
                     } else {
@@ -340,11 +340,11 @@ public class ModbusSource {
                         // if (requestKey.equals(currentKey)) {
                         //     currentKey = null;
                         // }
-                        log.log(Level.SEVERE, "Acquire timeout: " + requestKey + ", modbusInfo: " + modbusInfo.toString());
+                        log.error( "Acquire timeout: " + requestKey + ", modbusInfo: " + modbusInfo.toString());
                         return null;
                     }
                 } else {
-                    log.log(Level.WARNING, "Max waiters exceeded, request rejected: " + requestKey);
+                    log.warn( "Max waiters exceeded, request rejected: " + requestKey);
                     return null; // 超出最大等待数，直接返回不可用
                 }
             }
@@ -363,14 +363,14 @@ public class ModbusSource {
         try {
             if (currentKey != null && currentKey.equals(releaseKey)) {
                 currentKey = null;
-                log.log(Level.INFO, "Lock released: " + releaseKey);
+                log.info( "Lock released: " + releaseKey);
                 // 唤醒下一个等待的请求
                 if (!waitQueue.isEmpty()) {
                     condition.signal(); // 唤醒等待队列中的第一个线程
                 }
                 return true;
             }
-            log.log(Level.WARNING, "Invalid release key: " + releaseKey);
+            log.warn( "Invalid release key: " + releaseKey);
             return false;
         } finally {
             lock.unlock();
@@ -387,7 +387,7 @@ public class ModbusSource {
             this.modbusMaster = ModbusMasterFactory.createModbusMaster(modbusInfo);
             modbusMaster.init();
         } catch (ModbusInitException e) {
-            log.log(Level.SEVERE, "Failed to initialize Modbus master. modbusInfo: " + modbusInfo.toString(), e);
+            log.error( "Failed to initialize Modbus master. modbusInfo: " + modbusInfo.toString(), e);
         }
 
         // IpParameters ipParameters = new IpParameters();
@@ -399,7 +399,7 @@ public class ModbusSource {
         // try {
         //     modbusMaster.init();
         // } catch (ModbusInitException e) {
-        //     log.log(Level.SEVERE, "Failed to initialize Modbus master", e);
+        //     log.error( "Failed to initialize Modbus master", e);
         // }
     }
 
@@ -425,9 +425,9 @@ public class ModbusSource {
         if (registeredIntegrations.isEmpty() && modbusMaster != null && modbusMaster.isInitialized()) {
             modbusMaster.destroy();
             executor.shutdown();
-            log.log(Level.INFO, "Modbus connection closed by " + identity);
+            log.info( "Modbus connection closed by " + identity);
         } else {
-            log.log(Level.INFO, "Identity removed but connection kept open: " + identity + 
+            log.info( "Identity removed but connection kept open: " + identity + 
                               ", remaining integrations: " + registeredIntegrations.size());
         }
     }

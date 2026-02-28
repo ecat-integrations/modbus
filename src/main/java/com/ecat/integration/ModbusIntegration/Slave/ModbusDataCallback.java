@@ -15,9 +15,10 @@ package com.ecat.integration.ModbusIntegration.Slave;
  * <p>
  * 设计说明：
  * <ul>
- * <li>读操作：每次只读取单个寄存器/线圈（Modbus4J 内部循环调用）</li>
+ * <li>数据结构：统一使用 short (16位) 作为 Modbus 寄存器基本单位</li>
+ * <li>读操作：每次只读取单个寄存器（Modbus4J 内部循环调用）</li>
  * <li>写操作：区分单个写入（功能码 05/06）和批量写入（功能码 15/16）</li>
- * <li>返回 null/false 表示操作失败，返回数据/true 表示成功</li>
+ * <li>返回 0/false 表示操作失败，返回非0/true 表示成功</li>
  * </ul>
  * 
  * <p>
@@ -49,33 +50,33 @@ public interface ModbusDataCallback {
      * 读取单个线圈 - 功能码 01
      * @param slaveId 从站ID
      * @param address 寄存器地址
-     * @return 1字节，低位为线圈值 (0或1)，null表示失败
+     * @return 线圈值 (true=ON, false=OFF)
      */
-    byte[] onReadCoil(int slaveId, int address);
+    boolean onReadCoil(int slaveId, int address);
 
     /**
      * 读取单个离散输入 - 功能码 02
      * @param slaveId 从站ID
      * @param address 寄存器地址
-     * @return 1字节，低位为输入值 (0或1)，null表示失败
+     * @return 输入值 (true=ON, false=OFF)
      */
-    byte[] onReadDiscreteInput(int slaveId, int address);
+    boolean onReadDiscreteInput(int slaveId, int address);
 
     /**
      * 读取单个保持寄存器 - 功能码 03
      * @param slaveId 从站ID
      * @param address 寄存器地址
-     * @return 2字节 Big-Endian，null表示失败
+     * @return 16位寄存器值
      */
-    byte[] onReadHoldingRegister(int slaveId, int address);
+    short onReadHoldingRegister(int slaveId, int address);
 
     /**
      * 读取单个输入寄存器 - 功能码 04
      * @param slaveId 从站ID
      * @param address 寄存器地址
-     * @return 2字节 Big-Endian，null表示失败
+     * @return 16位寄存器值
      */
-    byte[] onReadInputRegister(int slaveId, int address);
+    short onReadInputRegister(int slaveId, int address);
 
     /**
      * 写入单个线圈 - 功能码 05
@@ -90,10 +91,10 @@ public interface ModbusDataCallback {
      * 写入单个寄存器 - 功能码 06
      * @param slaveId 从站ID
      * @param address 寄存器地址
-     * @param value 2字节 Big-Endian
+     * @param value 16位寄存器值
      * @return true=成功, false=失败
      */
-    boolean onWriteSingleRegister(int slaveId, int address, byte[] value);
+    boolean onWriteSingleRegister(int slaveId, int address, short value);
 
     /**
      * 写入多个线圈 - 功能码 15
@@ -109,8 +110,8 @@ public interface ModbusDataCallback {
      * 写入多个寄存器 - 功能码 16
      * @param slaveId 从站ID
      * @param startAddress 起始地址
-     * @param values 寄存器值 (每个寄存器2字节 Big-Endian)
+     * @param values 寄存器值数组 (每个元素为16位)
      * @return true=成功, false=失败
      */
-    boolean onWriteMultipleRegisters(int slaveId, int startAddress, byte[] values);
+    boolean onWriteMultipleRegisters(int slaveId, int startAddress, short[] values);
 }

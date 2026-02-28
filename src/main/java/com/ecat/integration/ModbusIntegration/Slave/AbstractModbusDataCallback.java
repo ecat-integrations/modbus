@@ -9,7 +9,7 @@ package com.ecat.integration.ModbusIntegration.Slave;
  * ModbusDataCallback 的默认抽象实现
  * 
  * <p>
- * 所有方法默认返回 FAILURE 或 null，子类只需重写需要支持的方法。
+ * 所有方法默认返回 FAILURE 或 0，子类只需重写需要支持的方法。
  * 这简化了回调接口的实现，开发者可以只关注需要的功能码。
  * 
  * <p>
@@ -17,12 +17,8 @@ package com.ecat.integration.ModbusIntegration.Slave;
  * <pre>{@code
  * ModbusDataCallback callback = new AbstractModbusDataCallback() {
  *     @Override
- *     public byte[] onReadHoldingRegister(int slaveId, int address) {
- *         int value = getDeviceValue(address);
- *         return new byte[] {
- *             (byte) ((value >> 8) & 0xFF),
- *             (byte) (value & 0xFF)
- *         };
+ *     public short onReadHoldingRegister(int slaveId, int address) {
+ *         return getDeviceValue(address);
  *     }
  * };
  * }</pre>
@@ -33,23 +29,23 @@ package com.ecat.integration.ModbusIntegration.Slave;
 public abstract class AbstractModbusDataCallback implements ModbusDataCallback {
 
     @Override
-    public byte[] onReadCoil(int slaveId, int address) {
-        return null;
+    public boolean onReadCoil(int slaveId, int address) {
+        return false;
     }
 
     @Override
-    public byte[] onReadDiscreteInput(int slaveId, int address) {
-        return null;
+    public boolean onReadDiscreteInput(int slaveId, int address) {
+        return false;
     }
 
     @Override
-    public byte[] onReadHoldingRegister(int slaveId, int address) {
-        return null;
+    public short onReadHoldingRegister(int slaveId, int address) {
+        return 0;
     }
 
     @Override
-    public byte[] onReadInputRegister(int slaveId, int address) {
-        return null;
+    public short onReadInputRegister(int slaveId, int address) {
+        return 0;
     }
 
     @Override
@@ -58,7 +54,7 @@ public abstract class AbstractModbusDataCallback implements ModbusDataCallback {
     }
 
     @Override
-    public boolean onWriteSingleRegister(int slaveId, int address, byte[] value) {
+    public boolean onWriteSingleRegister(int slaveId, int address, short value) {
         return FAILURE;
     }
 
@@ -68,7 +64,7 @@ public abstract class AbstractModbusDataCallback implements ModbusDataCallback {
     }
 
     @Override
-    public boolean onWriteMultipleRegisters(int slaveId, int startAddress, byte[] values) {
+    public boolean onWriteMultipleRegisters(int slaveId, int startAddress, short[] values) {
         return FAILURE;
     }
 }

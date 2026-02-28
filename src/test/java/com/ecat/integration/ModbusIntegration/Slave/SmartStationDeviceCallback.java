@@ -84,72 +84,62 @@ public class SmartStationDeviceCallback extends AbstractModbusDataCallback {
     }
 
     @Override
-    public byte[] onReadHoldingRegister(int slaveId, int address) {
+    public short onReadHoldingRegister(int slaveId, int address) {
         readCount.incrementAndGet();
         
         if (address < 0 || address >= registers.length) {
-            return null;
+            return 0;
         }
         
-        short value = registers[address];
-        return new byte[] {
-            (byte) ((value >> 8) & 0xFF),
-            (byte) (value & 0xFF)
-        };
+        return registers[address];
     }
 
     @Override
-    public byte[] onReadInputRegister(int slaveId, int address) {
+    public short onReadInputRegister(int slaveId, int address) {
         return onReadHoldingRegister(slaveId, address);
     }
 
     @Override
-    public byte[] onReadCoil(int slaveId, int address) {
+    public boolean onReadCoil(int slaveId, int address) {
         readCount.incrementAndGet();
         
         if (address < 0 || address >= registers.length) {
-            return null;
+            return false;
         }
         
-        boolean value = (registers[address] & 0x01) != 0;
-        return new byte[] { (byte) (value ? 0x01 : 0x00) };
+        return (registers[address] & 0x01) != 0;
     }
 
     @Override
-    public byte[] onReadDiscreteInput(int slaveId, int address) {
+    public boolean onReadDiscreteInput(int slaveId, int address) {
         return onReadCoil(slaveId, address);
     }
 
     @Override
-    public boolean onWriteSingleRegister(int slaveId, int address, byte[] value) {
+    public boolean onWriteSingleRegister(int slaveId, int address, short value) {
         writeCount.incrementAndGet();
         
-        if (address < 0 || address >= registers.length || value.length < 2) {
+        if (address < 0 || address >= registers.length) {
             return FAILURE;
         }
         
-        short val = (short) (((value[0] & 0xFF) << 8) | (value[1] & 0xFF));
-        registers[address] = val;
-        
-        handleSpecialWrite(address, val);
+        registers[address] = value;
+        handleSpecialWrite(address, value);
         
         return SUCCESS;
     }
 
     @Override
-    public boolean onWriteMultipleRegisters(int slaveId, int startAddress, byte[] values) {
+    public boolean onWriteMultipleRegisters(int slaveId, int startAddress, short[] values) {
         writeCount.incrementAndGet();
         
-        int quantity = values.length / 2;
-        
-        if (startAddress < 0 || startAddress + quantity > registers.length) {
+        if (startAddress < 0 || startAddress + values.length > registers.length) {
             return FAILURE;
         }
         
-        for (int i = 0; i < quantity; i++) {
-            short val = (short) (((values[i * 2] & 0xFF) << 8) | (values[i * 2 + 1] & 0xFF));
-            registers[startAddress + i] = val;
-            handleSpecialWrite(startAddress + i, val);
+        for (int i = 0; i < values.length; i++) {
+            registers[startAddress + i] = values[i];
+            handleSpecialWrite(startAddress + i, values[i]);
         }
         
         return SUCCESS;

@@ -5,6 +5,8 @@
  */
 package com.ecat.integration.ModbusIntegration.Slave;
 
+import com.ecat.core.Utils.Log;
+import com.ecat.core.Utils.LogFactory;
 import com.serotonin.modbus4j.ProcessImage;
 import com.serotonin.modbus4j.exception.IllegalDataAddressException;
 
@@ -24,15 +26,16 @@ import com.serotonin.modbus4j.exception.IllegalDataAddressException;
  * <li>Modbus4J 调用 ProcessImage 的对应方法</li>
  * <li>本类将调用转发给 ModbusDataCallback</li>
  * <li>用户回调返回数据或处理结果</li>
- * <li>本类解析结果并返回给 Modbus4J</li>
+ * <li>本类返回结果给 Modbus4J</li>
  * </ol>
  * 
  * <p>
  * 重要说明：
  * <ul>
+ * <li>数据结构：统一使用 short (16位) 作为 Modbus 寄存器基本单位</li>
  * <li>读操作：Modbus4J 对批量读取会循环调用单寄存器方法</li>
  * <li>写操作：区分 writeHoldingRegister（功能码06）和 writeHoldingRegisters（功能码16）</li>
- * <li>异常处理：回调返回 null/false 时抛出 IllegalDataAddressException</li>
+ * <li>异常处理：回调返回 0/false 时抛出 IllegalDataAddressException</li>
  * </ul>
  * 
  * @author coffee
@@ -41,6 +44,7 @@ import com.serotonin.modbus4j.exception.IllegalDataAddressException;
  */
 public class CallbackProcessImage implements ProcessImage {
 
+    private final Log log = LogFactory.getLogger(CallbackProcessImage.class);
     private final int slaveId;
     private ModbusDataCallback callback;
 
@@ -60,14 +64,15 @@ public class CallbackProcessImage implements ProcessImage {
 
     @Override
     public short getHoldingRegister(int offset) throws IllegalDataAddressException {
+        log.info("getHoldingRegister called: slaveId=" + slaveId + ", offset=" + offset);
         if (callback == null) {
+            log.warn("getHoldingRegister: callback is null");
             throw new IllegalDataAddressException();
         }
-        byte[] result = callback.onReadHoldingRegister(slaveId, offset);
-        if (result == null || result.length < 2) {
-            throw new IllegalDataAddressException();
-        }
-        return (short) (((result[0] & 0xFF) << 8) | (result[1] & 0xFF));
+        short result = callback.onReadHoldingRegister(slaveId, offset);
+        log.info("getHoldingRegister result: offset=" + offset + ", value=" + result);
+        // Note: 0 is a valid register value, don't throw exception for it
+        return result;
     }
 
     @Override
@@ -79,11 +84,7 @@ public class CallbackProcessImage implements ProcessImage {
         if (callback == null) {
             throw new IllegalDataAddressException();
         }
-        byte[] writeData = new byte[] {
-            (byte) ((value >> 8) & 0xFF),
-            (byte) (value & 0xFF)
-        };
-        if (!callback.onWriteSingleRegister(slaveId, offset, writeData)) {
+        if (!callback.onWriteSingleRegister(slaveId, offset, value)) {
             throw new IllegalDataAddressException();
         }
     }
@@ -93,13 +94,7 @@ public class CallbackProcessImage implements ProcessImage {
         if (callback == null) {
             throw new IllegalDataAddressException();
         }
-        int quantity = values.length;
-        byte[] writeData = new byte[quantity * 2];
-        for (int i = 0; i < quantity; i++) {
-            writeData[i * 2] = (byte) ((values[i] >> 8) & 0xFF);
-            writeData[i * 2 + 1] = (byte) (values[i] & 0xFF);
-        }
-        if (!callback.onWriteMultipleRegisters(slaveId, offset, writeData)) {
+        if (!callback.onWriteMultipleRegisters(slaveId, offset, values)) {
             throw new IllegalDataAddressException();
         }
     }
@@ -109,11 +104,9 @@ public class CallbackProcessImage implements ProcessImage {
         if (callback == null) {
             throw new IllegalDataAddressException();
         }
-        byte[] result = callback.onReadInputRegister(slaveId, offset);
-        if (result == null || result.length < 2) {
-            throw new IllegalDataAddressException();
-        }
-        return (short) (((result[0] & 0xFF) << 8) | (result[1] & 0xFF));
+        short result = callback.onReadInputRegister(slaveId, offset);
+        // Note: 0 is a valid register value, don't throw exception for it
+        return result;
     }
 
     @Override
@@ -125,11 +118,7 @@ public class CallbackProcessImage implements ProcessImage {
         if (callback == null) {
             throw new IllegalDataAddressException();
         }
-        byte[] result = callback.onReadCoil(slaveId, offset);
-        if (result == null || result.length < 1) {
-            throw new IllegalDataAddressException();
-        }
-        return (result[0] & 0x01) != 0;
+        return callback.onReadCoil(slaveId, offset);
     }
 
     @Override
@@ -168,11 +157,7 @@ public class CallbackProcessImage implements ProcessImage {
         if (callback == null) {
             throw new IllegalDataAddressException();
         }
-        byte[] result = callback.onReadDiscreteInput(slaveId, offset);
-        if (result == null || result.length < 1) {
-            throw new IllegalDataAddressException();
-        }
-        return (result[0] & 0x01) != 0;
+        return callback.onReadDiscreteInput(slaveId, offset);
     }
 
     @Override
