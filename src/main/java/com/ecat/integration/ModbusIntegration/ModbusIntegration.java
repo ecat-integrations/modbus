@@ -7,6 +7,9 @@ import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
 import com.ecat.core.Utils.DynamicConfig.IntegerValidator;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveConfig;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveRegistry;
+import com.ecat.integration.SerialIntegration.SerialInfo;
+import com.ecat.integration.SerialIntegration.SerialIntegration;
+import com.ecat.integration.SerialIntegration.SerialSource;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -29,6 +32,8 @@ public class ModbusIntegration extends IntegrationBase {
     private final Map<String, ModbusSource> serialSources = new HashMap<>();
     private final ModbusSlaveRegistry slaveRegistry = new ModbusSlaveRegistry();
 
+    private SerialIntegration serialIntegration;
+
     protected ConfigDefinition configDefinition;
 
     protected Integer maxWaiters; // 新建ModbusSource默认最大等待请求数
@@ -50,6 +55,19 @@ public class ModbusIntegration extends IntegrationBase {
             waitTimeoutMs = Const.DEFAULT_WAIT_TIMEOUT_MS;
         }
         log.info("ModbusIntegration initialized with maxWaiters: " + maxWaiters + ", waitTimeoutMs: " + waitTimeoutMs);
+
+        // Get serial integration for RTU path
+        try {
+            serialIntegration = (SerialIntegration) integrationRegistry
+                .getIntegration("integration-serial");
+            if (serialIntegration != null) {
+                log.info("Serial integration found for RTU path");
+            } else {
+                log.warn("Serial integration not found, RTU path will not be available");
+            }
+        } catch (Exception e) {
+            log.warn("Failed to get serial integration: " + e.getMessage());
+        }
     }
 
     @Override
@@ -62,8 +80,10 @@ public class ModbusIntegration extends IntegrationBase {
 
     @Override
     public void onRelease() {
-        tcpSources.values().forEach(ModbusSource::closeModbus);
-        serialSources.values().forEach(ModbusSource::closeModbus);
+        // 销毁所有共享连接的底层资源（master、executor、serial port）
+        // destroyResources() 由 ModbusMasterFactory 统一处理 TCP/RTU 传输资源释放
+        tcpSources.values().forEach(source -> source.destroyResources());
+        serialSources.values().forEach(source -> source.destroyResources());
         tcpSources.clear();
         serialSources.clear();
         slaveRegistry.clear();
@@ -102,14 +122,44 @@ public class ModbusIntegration extends IntegrationBase {
     private ModbusSource createOrGetSource(ModbusInfo info, String identity) {
         // 统一处理：获取共享的底层source，然后返回设备特定的包装器
         String connectionIdentity = getConnectionIdentity(info);
-        Map<String, ModbusSource> sourcePool = getSourcePool(info);
-        
-        ModbusSource sharedSource = sourcePool.computeIfAbsent(connectionIdentity, 
-            k -> new ModbusSource(info, maxWaiters, waitTimeoutMs));
-        
-        // 统一返回设备特定的DeviceSpecificModbusSource
-        DeviceSpecificModbusSource deviceSource = new DeviceSpecificModbusSource(sharedSource, info);
-        return deviceSource;
+
+        // 清理已销毁的 source（最后一个设备 release 后 executor 已 shutdown，
+        // 但 source 仍留在 map 中，导致 computeIfAbsent 返回死 source）
+        Map<String, ModbusSource> sourceMap = (info instanceof ModbusSerialInfo) ? serialSources : tcpSources;
+        ModbusSource existing = sourceMap.get(connectionIdentity);
+        if (existing != null && !existing.isModbusOpen()) {
+            sourceMap.remove(connectionIdentity);
+        }
+
+        ModbusSource sharedSource;
+        if (info instanceof ModbusSerialInfo && serialIntegration != null) {
+            // RTU 新模式：通过 serial integration 管理串口
+            sharedSource = serialSources.computeIfAbsent(connectionIdentity, k -> {
+                ModbusSerialInfo serialInfo = (ModbusSerialInfo) info;
+                SerialSource serialSource = serialIntegration.register(
+                    convertToSerialInfo(serialInfo), "modbus-" + connectionIdentity);
+                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true);
+                source.initSerialMaster(serialInfo, serialSource);
+                return source;
+            });
+        } else if (info instanceof ModbusSerialInfo) {
+            // RTU fallback：serial integration 不可用时，使用旧模式（自开串口）
+            sharedSource = serialSources.computeIfAbsent(connectionIdentity,
+                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs));
+        } else {
+            // TCP 模式
+            sharedSource = tcpSources.computeIfAbsent(connectionIdentity,
+                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs));
+        }
+
+        // 统一返回设备特定的DeviceSpecificModbusSource（传入 identity 用于正确的 close/release）
+        return new DeviceSpecificModbusSource(sharedSource, info, identity);
+    }
+
+    private SerialInfo convertToSerialInfo(ModbusSerialInfo info) {
+        return new SerialInfo(
+            info.getPortName(), info.getBaudrate(), info.getDataBits(),
+            info.getStopBits(), info.getParity(), 0, info.getTimeout());
     }
     
     private String getConnectionIdentity(ModbusInfo info) {
@@ -122,16 +172,6 @@ public class ModbusIntegration extends IntegrationBase {
         }
     }
     
-    private Map<String, ModbusSource> getSourcePool(ModbusInfo info) {
-        if (info instanceof ModbusTcpInfo) {
-            return tcpSources;
-        } else if (info instanceof ModbusSerialInfo) {
-            return serialSources;
-        } else {
-            throw new IllegalArgumentException("不支持的Modbus协议类型");
-        }
-    }
-
     /**
      * 获取TCP资源
      * 
@@ -144,7 +184,7 @@ public class ModbusIntegration extends IntegrationBase {
 
     /**
      * 获取串行资源
-     * 
+     *
      * @param identity 资源标识
      * @return 串行类型的ModbusSource
      */

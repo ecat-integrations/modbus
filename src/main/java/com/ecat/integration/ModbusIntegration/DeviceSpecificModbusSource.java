@@ -14,22 +14,33 @@ import java.util.concurrent.CompletableFuture;
  * @author coffee
  */
 public class DeviceSpecificModbusSource extends ModbusSource {
-    
+
     private final ModbusSource delegate;
     @Getter
     private final ModbusInfo deviceModbusInfo;
-    
+    private final String deviceIdentity;
+
     /**
      * 创建设备特定的ModbusSource
      * @param delegate 共享的底层ModbusSource
      * @param deviceModbusInfo 当前设备的ModbusInfo
+     * @param deviceIdentity 设备唯一标识（用于 closeModbus 时的引用计数）
      */
-    public DeviceSpecificModbusSource(ModbusSource delegate, ModbusInfo deviceModbusInfo) {
+    public DeviceSpecificModbusSource(ModbusSource delegate, ModbusInfo deviceModbusInfo, String deviceIdentity) {
         // 调用父类protected构造函数，传入一个临时的ModbusInfo
         super(delegate.getModbusInfo(), delegate.getMaxWaiters(), delegate.getWaitTimeoutMs(), true);
-        
+
         this.delegate = delegate;
         this.deviceModbusInfo = deviceModbusInfo;
+        this.deviceIdentity = deviceIdentity;
+    }
+
+    /**
+     * @deprecated 使用三参构造函数 {@link #DeviceSpecificModbusSource(ModbusSource, ModbusInfo, String)} 代替
+     */
+    @Deprecated
+    public DeviceSpecificModbusSource(ModbusSource delegate, ModbusInfo deviceModbusInfo) {
+        this(delegate, deviceModbusInfo, null);
     }
 
     public Integer getDeviceSlaveId() {
@@ -131,8 +142,10 @@ public class DeviceSpecificModbusSource extends ModbusSource {
     
     @Override
     public void closeModbus() {
-        // 不关闭，因为这是共享资源
-        // 只有在ModbusIntegration.onRelease()时才真正关闭
+        if (deviceIdentity != null) {
+            delegate.closeModbus(deviceIdentity);
+        }
+        // deviceIdentity == null 时保持旧行为（向后兼容）
     }
     
     @Override

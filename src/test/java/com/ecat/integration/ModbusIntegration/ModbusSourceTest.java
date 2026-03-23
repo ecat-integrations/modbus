@@ -72,16 +72,7 @@ public class ModbusSourceTest {
     }
 
     /**
-     * 测试资源释放
-     */
-    @Test
-    public void testCloseModbus() throws Exception {
-        modbusSource.closeModbus();
-        verify(modbusMaster, times(0)).destroy();
-    }
-
-    /**
-     * 测试资源释放
+     * 测试通过 identity 释放资源
      */
     @Test
     public void testCloseModbusByIdentity() throws Exception {

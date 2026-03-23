@@ -1,16 +1,22 @@
 package com.ecat.integration.ModbusIntegration;
 
 import com.ecat.core.Integration.IntegrationManager;
+import com.ecat.core.Integration.IntegrationRegistry;
 import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.TestTools;
+import com.ecat.integration.SerialIntegration.SerialIntegration;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import org.junit.*;
 import org.mockito.*;
+import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusMaster;
+import com.serotonin.modbus4j.ip.IpParameters;
 import java.lang.reflect.Method;
 import java.util.*;
 import static org.junit.Assert.*;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import org.mockito.MockedConstruction;
 
 /**
  * ModbusIntegration 单元测试
@@ -22,6 +28,8 @@ public class ModbusIntegrationTest {
     @Mock
     private IntegrationManager integrationManager;
     @Mock
+    private IntegrationRegistry integrationRegistry;
+    @Mock
     private ModbusSource modbusSource;
     @Mock
     private ModbusTcpInfo tcpInfo;
@@ -29,12 +37,17 @@ public class ModbusIntegrationTest {
     private ModbusSerialInfo serialInfo;
     @Mock
     private ConfigDefinition mockConfigDef;
+    @Mock
+    private SerialIntegration mockSerialIntegration;
+    @Mock
+    private SerialSource mockSerialSource;
 
     @InjectMocks
     private ModbusIntegration modbusIntegration;
 
     private AutoCloseable mockitoCloseable;
     private org.mockito.MockedStatic<ModbusMasterFactory> factoryMock;
+    private MockedConstruction<ModbusFactory> modbusFactoryConstruction;
 
     @Before
     public void setUp() {
@@ -50,10 +63,23 @@ public class ModbusIntegrationTest {
             // ignore for mock
         }
         factoryMock.when(() -> ModbusMasterFactory.createModbusMaster(any(ModbusInfo.class))).thenReturn(mockMaster);
+        factoryMock.when(() -> ModbusMasterFactory.createSerialMaster(any(ModbusSerialInfo.class), any(SerialSource.class))).thenReturn(mockMaster);
 
-        // 使用 TestTools 设置 integrationManager
+        // mock ModbusFactory constructor (used internally by ModbusMasterFactory)
+        final ModbusMaster finalMockMaster = mockMaster;
+        modbusFactoryConstruction = Mockito.mockConstruction(ModbusFactory.class,
+            (mock, context) -> {
+                try {
+                    when(mock.createTcpMaster(any(IpParameters.class), anyBoolean())).thenReturn(finalMockMaster);
+                } catch (Exception e) {
+                    // ignore for mock
+                }
+            });
+
+        // 使用 TestTools 设置 integrationManager 和 integrationRegistry
         try {
             TestTools.setPrivateField(modbusIntegration, "integrationManager", integrationManager);
+            TestTools.setPrivateField(modbusIntegration, "integrationRegistry", integrationRegistry);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -68,6 +94,9 @@ public class ModbusIntegrationTest {
         }
         if (factoryMock != null) {
             factoryMock.close();
+        }
+        if (modbusFactoryConstruction != null) {
+            modbusFactoryConstruction.close();
         }
         mockitoCloseable.close();
     }
@@ -99,8 +128,6 @@ public class ModbusIntegrationTest {
         config.put("wait_timeout", 2000);
         when(integrationManager.loadConfig(anyString())).thenReturn(config);
 
-        // when(mockConfigDef.validateConfig(config)).thenReturn(true);
-
         modbusIntegration.onInit();
 
         assertEquals(Integer.valueOf(5), modbusIntegration.maxWaiters);
@@ -111,8 +138,6 @@ public class ModbusIntegrationTest {
     public void testOnInit_withInvalidConfig() {
         Map<String, Object> config = new HashMap<>();
         when(integrationManager.loadConfig(anyString())).thenReturn(config);
-
-        // when(mockConfigDef.validateConfig(config)).thenReturn(false);
 
         modbusIntegration.onInit();
 
@@ -134,6 +159,7 @@ public class ModbusIntegrationTest {
         try {
             ModbusSource result = (ModbusSource) invokePrivateMethod(modbusIntegration, "createOrGetSource", info, identity);
             assertNotNull(result);
+            assertTrue(result instanceof DeviceSpecificModbusSource);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -145,9 +171,9 @@ public class ModbusIntegrationTest {
         when(info.getPortName()).thenReturn("COM1");
         when(info.getProtocol()).thenReturn(ModbusProtocol.SERIAL);
         String identity = "serial1";
-        
+
         modbusIntegration.onInit();
-        
+
         // 直接调用公共方法 register
         ModbusSource result = modbusIntegration.register(info, identity);
         assertNotNull(result);
@@ -165,15 +191,170 @@ public class ModbusIntegrationTest {
             Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "tcpSources");
             Map<String, ModbusSource> serialSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "serialSources");
 
-            tcpSources.put("tcp1", tcpSource);
-            serialSources.put("serial1", serialSource);
+            tcpSources.put("tcp-device-1", tcpSource);
+            serialSources.put("serial-device-1", serialSource);
 
             modbusIntegration.onRelease();
 
-            verify(tcpSource, times(1)).closeModbus();
-            verify(serialSource, times(1)).closeModbus();
+            // 验证 onRelease 正确调用 destroyResources() 销毁底层资源
+            verify(tcpSource, times(1)).destroyResources();
+            verify(serialSource, times(1)).destroyResources();
             assertTrue(tcpSources.isEmpty());
             assertTrue(serialSources.isEmpty());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    // ==================== Unified register() API Tests ====================
+
+    @Test
+    public void testRegister_serialFallback_whenSerialIntegrationNull() {
+        // Don't set serialIntegration — it defaults to null, should fallback to old mode
+        modbusIntegration.onInit();
+
+        ModbusSerialInfo info = new ModbusSerialInfo("COM1", 9600, 8, 1, 0, 1000, 1);
+
+        // Should not throw — falls back to old mode (direct serial port)
+        ModbusSource result = modbusIntegration.register(info, "serial-fallback-1");
+        assertNotNull("register should return non-null even without serial integration", result);
+        assertTrue(result instanceof DeviceSpecificModbusSource);
+    }
+
+    @Test
+    public void testRegister_serial_withSerialIntegration() throws Exception {
+        // Set up mock serial integration via integrationRegistry
+        when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
+        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+            .thenReturn(mockSerialSource);
+        when(mockSerialSource.getTimeout()).thenReturn(1000);
+
+        modbusIntegration.onInit();
+
+        ModbusSerialInfo info = new ModbusSerialInfo("COM1", 9600, 8, 1, 0, 1000, 1);
+
+        ModbusSource result = modbusIntegration.register(info, "serial-new-1");
+
+        assertNotNull("register should return non-null", result);
+        assertTrue(result instanceof DeviceSpecificModbusSource);
+        DeviceSpecificModbusSource deviceSource = (DeviceSpecificModbusSource) result;
+        assertEquals(Integer.valueOf(1), deviceSource.getDeviceSlaveId());
+        // Verify serial integration was called with correct identity prefix
+        verify(mockSerialIntegration).register(
+            any(com.ecat.integration.SerialIntegration.SerialInfo.class),
+            eq("modbus-COM1"));
+    }
+
+    @Test
+    public void testRegister_serial_convertSerialInfo() throws Exception {
+        // Set up mock serial integration via integrationRegistry
+        when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
+        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+            .thenReturn(mockSerialSource);
+        when(mockSerialSource.getTimeout()).thenReturn(500);
+
+        modbusIntegration.onInit();
+
+        ModbusSerialInfo info = new ModbusSerialInfo("/dev/ttyUSB0", 19200, 8, 2, 2, 500, 5);
+
+        modbusIntegration.register(info, "device-5");
+
+        // Verify the conversion happened correctly
+        ArgumentCaptor<com.ecat.integration.SerialIntegration.SerialInfo> captor =
+            ArgumentCaptor.forClass(com.ecat.integration.SerialIntegration.SerialInfo.class);
+        verify(mockSerialIntegration).register(captor.capture(), eq("modbus-/dev/ttyUSB0"));
+
+        com.ecat.integration.SerialIntegration.SerialInfo captured = captor.getValue();
+        assertNotNull(captured);
+        // Verify port name and baudrate were transferred correctly
+        assertTrue(captured.toString().contains("/dev/ttyUSB0"));
+        assertTrue(captured.toString().contains("19200"));
+    }
+
+    @Test
+    public void testRegister_tcp_returnsDeviceSpecificModbusSource() {
+        modbusIntegration.onInit();
+
+        ModbusTcpInfo info = new ModbusTcpInfo("192.168.1.100", 502, 1);
+
+        ModbusSource result = modbusIntegration.register(info, "tcp-device1");
+
+        assertNotNull("register should return non-null", result);
+        assertTrue(result instanceof DeviceSpecificModbusSource);
+        DeviceSpecificModbusSource deviceSource = (DeviceSpecificModbusSource) result;
+        assertEquals(Integer.valueOf(1), deviceSource.getDeviceSlaveId());
+    }
+
+    @Test
+    public void testRegister_tcp_reusesSourceForSameConnection() {
+        modbusIntegration.onInit();
+
+        ModbusTcpInfo info1 = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        ModbusTcpInfo info2 = new ModbusTcpInfo("192.168.1.100", 502, 2);
+
+        ModbusSource source1 = modbusIntegration.register(info1, "device1");
+        ModbusSource source2 = modbusIntegration.register(info2, "device2");
+
+        // Both sources should share the same underlying delegate (same getModbusInfo)
+        assertNotNull(source1.getModbusInfo());
+        assertSame("Sources should share the same underlying ModbusSource", source1.getModbusInfo(), source2.getModbusInfo());
+    }
+
+    @Test
+    public void testRegister_tcp_createsDifferentSourcesForDifferentConnections() {
+        modbusIntegration.onInit();
+
+        ModbusTcpInfo info1 = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        ModbusTcpInfo info2 = new ModbusTcpInfo("192.168.1.200", 502, 1);
+
+        ModbusSource source1 = modbusIntegration.register(info1, "device1");
+        ModbusSource source2 = modbusIntegration.register(info2, "device2");
+
+        // Sources should have different underlying delegates
+        assertNotSame("Sources should have different underlying ModbusSources", source1.getModbusInfo(), source2.getModbusInfo());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testOnRelease_cleansUpSources() throws Exception {
+        modbusIntegration.onInit();
+
+        // Register a TCP source to populate tcpSources map
+        ModbusTcpInfo info = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        modbusIntegration.register(info, "device1");
+
+        Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "tcpSources");
+        Map<String, ModbusSource> serialSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "serialSources");
+        assertFalse("tcpSources should not be empty before release", tcpSources.isEmpty());
+
+        modbusIntegration.onRelease();
+
+        assertTrue("tcpSources should be empty after release", tcpSources.isEmpty());
+        assertTrue("serialSources should be empty after release", serialSources.isEmpty());
+    }
+
+    @Test
+    public void testOnInit_serialIntegrationNotFound() {
+        // integrationRegistry returns null for serial integration
+        when(integrationRegistry.getIntegration(anyString())).thenReturn(null);
+        modbusIntegration.onInit();
+
+        try {
+            Object serialIntegration = TestTools.getPrivateField(modbusIntegration, "serialIntegration");
+            assertNull("serialIntegration should be null when not found", serialIntegration);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    public void testOnInit_serialIntegrationFound() {
+        when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
+        modbusIntegration.onInit();
+
+        try {
+            Object serialIntegration = TestTools.getPrivateField(modbusIntegration, "serialIntegration");
+            assertSame("serialIntegration should be the mocked instance", mockSerialIntegration, serialIntegration);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

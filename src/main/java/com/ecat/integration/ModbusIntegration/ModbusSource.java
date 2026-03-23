@@ -53,6 +53,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import com.ecat.core.Utils.Log;
 import com.ecat.core.Utils.LogFactory;
+import com.ecat.core.Utils.Mdc.MdcExecutorService;
 
 public class ModbusSource {
     private final Log log = LogFactory.getLogger(getClass());
@@ -69,7 +70,7 @@ public class ModbusSource {
     @Getter
     private ModbusInfo modbusInfo;
     private List<String> registeredIntegrations;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService executor = MdcExecutorService.wrap(Executors.newSingleThreadExecutor());
 
     protected ModbusSource(ModbusInfo modbusInfo) {
         this(modbusInfo, Const.DEFAULT_MAX_WAITERS, Const.DEFAULT_WAIT_TIMEOUT_MS); // 默认最大等待请求数为1，等待超时时间为Const.WAIT_TIMEOUT_MS
@@ -86,6 +87,22 @@ public class ModbusSource {
         this.registeredIntegrations = new ArrayList<>();
         if (!skipOpen) {
             openModbus();
+        }
+    }
+
+    /**
+     * 通过 ModbusMasterFactory 创建 master 并初始化（用于 RTU 新模式）。
+     * 工厂内部跟踪 SerialSource 生命周期。
+     *
+     * @param serialInfo 串口配置
+     * @param serialSource 来自 serial integration 的串口资源
+     */
+    protected void initSerialMaster(ModbusSerialInfo serialInfo, com.ecat.integration.SerialIntegration.SerialSource serialSource) {
+        try {
+            this.modbusMaster = ModbusMasterFactory.createSerialMaster(serialInfo, serialSource);
+            modbusMaster.init();
+        } catch (ModbusInitException e) {
+            log.error( "Failed to initialize RTU master with SerialSource. serialInfo: " + serialInfo.toString(), e);
         }
     }
 
@@ -279,7 +296,6 @@ public class ModbusSource {
         registeredIntegrations.add(identity);
     }
 
-    @Deprecated
     protected void removeIntegration(String identity) {
         registeredIntegrations.remove(identity);
     }
@@ -389,27 +405,18 @@ public class ModbusSource {
         } catch (ModbusInitException e) {
             log.error( "Failed to initialize Modbus master. modbusInfo: " + modbusInfo.toString(), e);
         }
-
-        // IpParameters ipParameters = new IpParameters();
-        // ipParameters.setHost(modbusInfo.ipAddress);
-        // ipParameters.setPort(modbusInfo.port);
-
-        // ModbusFactory modbusFactory = new ModbusFactory();
-        // modbusMaster = modbusFactory.createTcpMaster(ipParameters, false);
-        // try {
-        //     modbusMaster.init();
-        // } catch (ModbusInitException e) {
-        //     log.error( "Failed to initialize Modbus master", e);
-        // }
     }
 
     /**
-     * @deprecated 此方法不应被调用，无法完成资源释放，更换正确方法
+     * 关闭 Modbus 连接。
+     * 子类必须覆写此方法以实现正确的资源释放。
+     * 共享连接通过 {@link #closeModbus(String)} 引用计数管理。
+     *
+     * @throws UnsupportedOperationException 默认实现抛出异常，强制子类实现
      * @see #closeModbus(String identity)
      */
-    @Deprecated
     public void closeModbus() {
-        // Empty implementation to prevent misuse
+        throw new UnsupportedOperationException("Subclasses must implement closeModbus()");
     }
 
     public void closeModbus(String identity) {
@@ -417,19 +424,27 @@ public class ModbusSource {
         if (!registeredIntegrations.contains(identity)) {
             throw new IllegalArgumentException("Identity not found: " + identity);
         }
-        
+
         // Remove the integration from registered list
         registeredIntegrations.remove(identity);
-        
+
         // Only close Modbus if no integrations are registered
-        if (registeredIntegrations.isEmpty() && modbusMaster != null && modbusMaster.isInitialized()) {
-            modbusMaster.destroy();
-            executor.shutdown();
+        if (registeredIntegrations.isEmpty()) {
+            destroyResources();
             log.info( "Modbus connection closed by " + identity);
         } else {
-            log.info( "Identity removed but connection kept open: " + identity + 
+            log.info( "Identity removed but connection kept open: " + identity +
                               ", remaining integrations: " + registeredIntegrations.size());
         }
+    }
+
+    /**
+     * 销毁底层资源（ModbusMaster、线程池）。
+     * TCP/RTU 传输资源差异由 {@link ModbusMasterFactory#destroyMaster(ModbusMaster)} 统一处理。
+     */
+    protected void destroyResources() {
+        ModbusMasterFactory.destroyMaster(modbusMaster);
+        executor.shutdown();
     }
 
     public boolean isModbusOpen() {

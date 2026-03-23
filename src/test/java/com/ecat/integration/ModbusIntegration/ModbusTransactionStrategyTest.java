@@ -145,6 +145,5 @@ public class ModbusTransactionStrategyTest {
         f2.get();
 
         executor.shutdown();
-        source.closeModbus(); // 清理资源
     }
 }

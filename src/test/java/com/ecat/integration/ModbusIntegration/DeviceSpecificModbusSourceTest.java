@@ -53,7 +53,7 @@ public class DeviceSpecificModbusSourceTest {
         when(mockDelegate.getWaitTimeoutMs()).thenReturn(3000);
         when(mockModbusInfo.getSlaveId()).thenReturn(DEVICE_SLAVE_ID);
         
-        deviceSpecificSource = new DeviceSpecificModbusSource(mockDelegate, mockModbusInfo);
+        deviceSpecificSource = new DeviceSpecificModbusSource(mockDelegate, mockModbusInfo, TEST_IDENTITY);
     }
 
     @After
@@ -313,8 +313,8 @@ public class DeviceSpecificModbusSourceTest {
     @Test
     public void testCloseModbus() {
         deviceSpecificSource.closeModbus();
-        // 验证没有调用delegate的closeModbus，因为这是共享资源
-        verify(mockDelegate, never()).closeModbus();
+        // 验证 closeModbus() 正确转发到 delegate.closeModbus(deviceIdentity)
+        verify(mockDelegate, times(1)).closeModbus(TEST_IDENTITY);
     }
 
     @Test
