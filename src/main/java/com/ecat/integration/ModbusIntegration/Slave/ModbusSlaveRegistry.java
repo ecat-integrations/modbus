@@ -96,6 +96,19 @@ public class ModbusSlaveRegistry {
         }
 
         server.unregisterCallback(slaveId);
+
+        // 当 server 无任何 callback 时，停止并从 registry 移除，
+        // 避免 register 时 computeIfAbsent 复用已停止的 stale server，
+        // 同时防止未调 stopSlave 就 unregister 导致的 SerialSource/线程泄漏
+        if (server.getCallbackCount() == 0) {
+            if (server.isRunning()) {
+                server.stop();
+                log.info("Stopped slave server during unregister: connectionId=" + connectionId);
+            }
+            serverMap.remove(connectionId);
+            log.info("Removed slave server from registry: connectionId=" + connectionId);
+        }
+
         log.info("Unregistered slave callback: connectionId=" + connectionId + ", slaveId=" + slaveId);
     }
 

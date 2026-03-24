@@ -97,6 +97,10 @@ public class ModbusSlaveServer {
         }
     }
 
+    public int getCallbackCount() {
+        return processImageMap.size();
+    }
+
     public synchronized void start() throws ModbusInitException {
         if (running) {
             log.warn("Slave server is already running: " + config.getConnectionIdentity());
