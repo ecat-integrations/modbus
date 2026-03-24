@@ -30,7 +30,7 @@ public class ModbusSlaveRegistryTest {
         ModbusDataCallback callback = mock(ModbusDataCallback.class);
         config.setCallback(callback);
 
-        registry.register(config);
+        registry.register(config, null);
 
         assertNotNull(registry.getServer("0.0.0.0:5020"));
     }
@@ -40,7 +40,7 @@ public class ModbusSlaveRegistryTest {
         ModbusTcpSlaveConfig config = new ModbusTcpSlaveConfig(1, "0.0.0.0", 5020);
         config.setCallback(null);
 
-        registry.register(config);
+        registry.register(config, null);
     }
 
     @Test
@@ -53,8 +53,8 @@ public class ModbusSlaveRegistryTest {
         ModbusTcpSlaveConfig config2 = new ModbusTcpSlaveConfig(2, "0.0.0.0", 5020);
         config2.setCallback(callback2);
 
-        registry.register(config1);
-        registry.register(config2);
+        registry.register(config1, null);
+        registry.register(config2, null);
 
         assertNotNull(registry.getServer("0.0.0.0:5020"));
     }
@@ -65,7 +65,7 @@ public class ModbusSlaveRegistryTest {
         ModbusDataCallback callback = mock(ModbusDataCallback.class);
         config.setCallback(callback);
 
-        registry.register(config);
+        registry.register(config, null);
         registry.unregister("0.0.0.0:5020", 1);
     }
 
@@ -85,7 +85,7 @@ public class ModbusSlaveRegistryTest {
         ModbusDataCallback callback = mock(ModbusDataCallback.class);
         config.setCallback(callback);
 
-        registry.register(config);
+        registry.register(config, null);
         registry.clear();
 
         assertNull(registry.getServer("0.0.0.0:5020"));

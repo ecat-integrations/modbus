@@ -1,6 +1,9 @@
 package com.ecat.integration.ModbusIntegration;
 
 import com.ecat.core.Integration.IntegrationManager;
+import com.ecat.core.Integration.IntegrationRegistry;
+import com.ecat.integration.SerialIntegration.SerialIntegration;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import org.junit.*;
 import org.mockito.*;
 
@@ -11,7 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import com.serotonin.modbus4j.ModbusMaster;
 import static org.junit.Assert.*;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -38,6 +41,13 @@ public class ModbusIntegrationMultiDeviceTest {
     @Mock
     private ModbusTcpInfo mockTcpInfo2;
 
+    @Mock
+    private IntegrationRegistry integrationRegistry;
+    @Mock
+    private SerialIntegration mockSerialIntegration;
+    @Mock
+    private SerialSource mockSerialSource;
+
     private AutoCloseable mockitoCloseable;
     private org.mockito.MockedStatic<ModbusMasterFactory> factoryMock;
 
@@ -50,7 +60,14 @@ public class ModbusIntegrationMultiDeviceTest {
         factoryMock = Mockito.mockStatic(ModbusMasterFactory.class);
         ModbusMaster mockMaster = mock(ModbusMaster.class);
         doNothing().when(mockMaster).init();
+        when(mockMaster.isInitialized()).thenReturn(true);
         factoryMock.when(() -> ModbusMasterFactory.createModbusMaster(any(ModbusInfo.class))).thenReturn(mockMaster);
+        factoryMock.when(() -> ModbusMasterFactory.createSerialMaster(any(ModbusSerialInfo.class), any(SerialSource.class))).thenReturn(mockMaster);
+
+        // mock serial integration for RTU path
+        when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
+        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+            .thenReturn(mockSerialSource);
 
         // 设置串口设备信息
         when(mockSerialInfo1.getPortName()).thenReturn("COM1");
@@ -77,13 +94,17 @@ public class ModbusIntegrationMultiDeviceTest {
         config.put("wait_timeout", 2000);
         when(integrationManager.loadConfig(anyString())).thenReturn(config);
 
-        // 使用反射设置integrationManager
+        // 使用反射设置integrationManager 和 integrationRegistry
         try {
             java.lang.reflect.Field integrationManagerField = ModbusIntegration.class.getSuperclass().getDeclaredField("integrationManager");
             integrationManagerField.setAccessible(true);
             integrationManagerField.set(modbusIntegration, integrationManager);
+
+            java.lang.reflect.Field integrationRegistryField = ModbusIntegration.class.getSuperclass().getDeclaredField("integrationRegistry");
+            integrationRegistryField.setAccessible(true);
+            integrationRegistryField.set(modbusIntegration, integrationRegistry);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to set integrationManager", e);
+            throw new RuntimeException("Failed to set integrationManager/integrationRegistry", e);
         }
 
         modbusIntegration.onInit();

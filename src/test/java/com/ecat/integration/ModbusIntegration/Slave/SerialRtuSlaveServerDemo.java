@@ -5,6 +5,9 @@
  */
 package com.ecat.integration.ModbusIntegration.Slave;
 
+import com.ecat.integration.SerialIntegration.SerialInfo;
+import com.ecat.integration.SerialIntegration.SerialSource;
+
 import java.util.Scanner;
 
 /**
@@ -76,7 +79,15 @@ public class SerialRtuSlaveServerDemo {
         );
         config.setCallback(callback);
 
-        slaveServer = new ModbusSlaveServer(config);
+        // 使用 SerialSource 新模式：通过 standalone SerialSource 管理串口
+        SerialInfo serialSourceInfo = new SerialInfo(
+            PORT, BAUD_RATE, 8,
+            ModbusSerialSlaveConfig.ONE_STOP_BIT, ModbusSerialSlaveConfig.NO_PARITY,
+            0, 1000
+        );
+        SerialSource serialSource = new SerialSource(serialSourceInfo);
+
+        slaveServer = new ModbusSlaveServer(config, serialSource);
         slaveServer.registerCallback(SLAVE_ID, callback);
         slaveServer.start();
 

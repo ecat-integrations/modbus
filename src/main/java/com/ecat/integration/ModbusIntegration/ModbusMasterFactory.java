@@ -5,7 +5,6 @@ import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusMaster;
 import com.serotonin.modbus4j.exception.ModbusInitException;
 import com.serotonin.modbus4j.ip.IpParameters;
-import com.serotonin.modbus4j.serial.SerialPortWrapper;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,18 +26,22 @@ public class ModbusMasterFactory {
     private static final Map<ModbusMaster, SerialSource> serialMasterRegistry = new ConcurrentHashMap<>();
 
     /**
-     * 创建ModbusMaster实例
-     * @param info Modbus设备信息（TCP或串行）
+     * RTU 模式下 master → ModbusSerialPortWrapper 的映射，用于销毁时恢复 event adapter
+     */
+    private static final Map<ModbusMaster, ModbusSerialPortWrapper> wrapperRegistry = new ConcurrentHashMap<>();
+
+    /**
+     * 创建ModbusMaster实例（仅 TCP）
+     * @param info Modbus设备信息（仅支持 TCP）
      * @return ModbusMaster实例
      * @throws ModbusInitException 初始化异常
      */
     public static ModbusMaster createModbusMaster(ModbusInfo info) throws ModbusInitException {
-        ModbusFactory factory = new ModbusFactory();
-
         if (info instanceof ModbusTcpInfo) {
+            ModbusFactory factory = new ModbusFactory();
             return createTcpMaster((ModbusTcpInfo) info, factory);
         } else if (info instanceof ModbusSerialInfo) {
-            return createSerialMaster((ModbusSerialInfo) info, factory);
+            throw new IllegalArgumentException("RTU 设备必须使用 createSerialMaster(info, serialSource)");
         } else {
             throw new IllegalArgumentException("未知的Modbus协议类型");
         }
@@ -57,11 +60,12 @@ public class ModbusMasterFactory {
      */
     public static ModbusMaster createSerialMaster(ModbusSerialInfo serialInfo, SerialSource serialSource) throws ModbusInitException {
         ModbusFactory factory = new ModbusFactory();
-        SerialPortWrapper serialPortWrapper = new ModbusSerialPortWrapper(serialInfo, serialSource);
+        ModbusSerialPortWrapper serialPortWrapper = new ModbusSerialPortWrapper(serialInfo, serialSource);
         ModbusMaster modbusMaster = factory.createRtuMaster(serialPortWrapper);
         modbusMaster.setTimeout(serialInfo.getTimeout());
-        // 注册映射：销毁时需要释放 SerialSource
+        // 注册映射：销毁时需要恢复 event adapter + 释放 SerialSource
         serialMasterRegistry.put(modbusMaster, serialSource);
+        wrapperRegistry.put(modbusMaster, serialPortWrapper);
         return modbusMaster;
     }
 
@@ -78,8 +82,13 @@ public class ModbusMasterFactory {
      */
     public static void destroyMaster(ModbusMaster master) {
         SerialSource serialSource = serialMasterRegistry.remove(master);
+        ModbusSerialPortWrapper wrapper = wrapperRegistry.remove(master);
         if (master != null && master.isInitialized()) {
             master.destroy();
+        }
+        // 恢复 event adapter（wrapper.destroy() 内部会检查 adapterPaused 标志）
+        if (wrapper != null) {
+            wrapper.destroy();
         }
         if (serialSource != null) {
             serialSource.closePort();
@@ -96,13 +105,5 @@ public class ModbusMasterFactory {
             ipParams.setEncapsulated(false); // 标准 Modbus TCP
         }
         return factory.createTcpMaster(ipParams, false); // false表示非保持连接
-    }
-
-    private static ModbusMaster createSerialMaster(ModbusSerialInfo serialInfo, ModbusFactory factory) {
-        SerialPortWrapper serialPortWrapper = new ModbusSerialPortWrapper(serialInfo);
-        ModbusMaster modbusMaster = factory.createRtuMaster(serialPortWrapper); // RTU模式
-        modbusMaster.setTimeout(serialInfo.getTimeout());
-        // modbusMaster.setDiscardDataDelay((int)(serialInfo.getTimeout()*1.2));
-        return modbusMaster;
     }
 }

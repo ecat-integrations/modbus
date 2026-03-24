@@ -62,6 +62,7 @@ public class ModbusIntegrationTest {
         } catch (com.serotonin.modbus4j.exception.ModbusInitException e) {
             // ignore for mock
         }
+        when(mockMaster.isInitialized()).thenReturn(true);
         factoryMock.when(() -> ModbusMasterFactory.createModbusMaster(any(ModbusInfo.class))).thenReturn(mockMaster);
         factoryMock.when(() -> ModbusMasterFactory.createSerialMaster(any(ModbusSerialInfo.class), any(SerialSource.class))).thenReturn(mockMaster);
 
@@ -167,6 +168,11 @@ public class ModbusIntegrationTest {
 
     @Test
     public void testRegister_andGetSource_Serial() {
+        // Set up mock serial integration
+        when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
+        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+            .thenReturn(mockSerialSource);
+
         ModbusSerialInfo info = mock(ModbusSerialInfo.class);
         when(info.getPortName()).thenReturn("COM1");
         when(info.getProtocol()).thenReturn(ModbusProtocol.SERIAL);
@@ -209,16 +215,19 @@ public class ModbusIntegrationTest {
     // ==================== Unified register() API Tests ====================
 
     @Test
-    public void testRegister_serialFallback_whenSerialIntegrationNull() {
-        // Don't set serialIntegration — it defaults to null, should fallback to old mode
+    public void testRegister_serialThrows_whenSerialIntegrationNull() {
+        // Don't set serialIntegration — it defaults to null, should throw
         modbusIntegration.onInit();
 
         ModbusSerialInfo info = new ModbusSerialInfo("COM1", 9600, 8, 1, 0, 1000, 1);
 
-        // Should not throw — falls back to old mode (direct serial port)
-        ModbusSource result = modbusIntegration.register(info, "serial-fallback-1");
-        assertNotNull("register should return non-null even without serial integration", result);
-        assertTrue(result instanceof DeviceSpecificModbusSource);
+        // Should throw — RTU requires serial integration (no more fallback)
+        try {
+            modbusIntegration.register(info, "serial-fallback-1");
+            fail("Should throw IllegalStateException when serial integration is null");
+        } catch (IllegalStateException e) {
+            // expected
+        }
     }
 
     @Test

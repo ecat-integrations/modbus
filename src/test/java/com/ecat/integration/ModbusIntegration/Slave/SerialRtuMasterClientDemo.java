@@ -7,6 +7,8 @@ package com.ecat.integration.ModbusIntegration.Slave;
 
 import com.ecat.integration.ModbusIntegration.ModbusSerialInfo;
 import com.ecat.integration.ModbusIntegration.ModbusSerialPortWrapper;
+import com.ecat.integration.SerialIntegration.SerialInfo;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusMaster;
 import com.serotonin.modbus4j.exception.ModbusTransportException;
@@ -105,8 +107,16 @@ public class SerialRtuMasterClientDemo {
             3000, SLAVE_ID
         );
 
+        // 使用 SerialSource 新模式：通过 standalone SerialSource 管理串口
+        SerialInfo serialSourceInfo = new SerialInfo(
+            PORT, BAUD_RATE, 8,
+            ModbusSerialInfo.ONE_STOP_BIT, ModbusSerialInfo.NO_PARITY,
+            0, 3000
+        );
+        SerialSource serialSource = new SerialSource(serialSourceInfo);
+
         ModbusFactory factory = new ModbusFactory();
-        master = factory.createRtuMaster(new ModbusSerialPortWrapper(serialInfo));
+        master = factory.createRtuMaster(new ModbusSerialPortWrapper(serialInfo, serialSource));
         master.setTimeout(3000);
         master.init();
 

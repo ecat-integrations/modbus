@@ -10,12 +10,11 @@ import com.ecat.core.Utils.LogFactory;
 import com.ecat.integration.ModbusIntegration.ModbusProtocol;
 import com.ecat.integration.ModbusIntegration.ModbusSerialInfo;
 import com.ecat.integration.ModbusIntegration.ModbusSerialPortWrapper;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusSlaveSet;
 import com.serotonin.modbus4j.exception.ModbusInitException;
 import com.serotonin.modbus4j.ip.tcp.TcpSlave;
-import com.serotonin.modbus4j.serial.SerialPortWrapper;
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -63,13 +62,26 @@ import java.util.concurrent.Executors;
 public class ModbusSlaveServer {
     private final Log log = LogFactory.getLogger(getClass());
     private final ModbusSlaveConfig config;
+    private final SerialSource serialSource; // RTU 新模式：来自 serial integration（TCP 为 null）
     private ModbusSlaveSet slaveSet;
+    private ModbusSerialPortWrapper serialPortWrapper; // RTU 新模式：持有 wrapper 引用，stop 时恢复 event adapter
     private final Map<Integer, CallbackProcessImage> processImageMap = new ConcurrentHashMap<>();
     private volatile boolean running = false;
     private ExecutorService executor;
 
+    /**
+     * TCP 模式构造函数（serialSource 为 null）
+     */
     public ModbusSlaveServer(ModbusSlaveConfig config) {
+        this(config, null);
+    }
+
+    /**
+     * 构造函数（TCP 传 null，RTU 传 SerialSource）
+     */
+    public ModbusSlaveServer(ModbusSlaveConfig config, SerialSource serialSource) {
         this.config = config;
+        this.serialSource = serialSource;
     }
 
     public void registerCallback(int slaveId, ModbusDataCallback callback) {
@@ -134,6 +146,9 @@ public class ModbusSlaveServer {
     }
 
     private void startSerialSlave(ModbusSerialSlaveConfig serialConfig) {
+        if (serialSource == null) {
+            throw new IllegalStateException("SerialSource is required for RTU Slave, but was null");
+        }
         ModbusFactory factory = new ModbusFactory();
         ModbusSerialInfo serialInfo = new ModbusSerialInfo(
             serialConfig.getPortName(),
@@ -144,17 +159,17 @@ public class ModbusSlaveServer {
             1000,
             serialConfig.getSlaveId()
         );
-        SerialPortWrapper portWrapper = new ModbusSerialPortWrapper(serialInfo);
-        slaveSet = factory.createRtuSlave(portWrapper);
+        serialPortWrapper = new ModbusSerialPortWrapper(serialInfo, serialSource);
+        slaveSet = factory.createRtuSlave(serialPortWrapper);
     }
 
     public synchronized void stop() {
         if (!running) {
             return;
         }
-        
+
         running = false;
-        
+
         if (slaveSet != null) {
             try {
                 slaveSet.stop();
@@ -163,6 +178,12 @@ public class ModbusSlaveServer {
                 log.warn("Error stopping slave server: " + e.getMessage());
             }
             slaveSet = null;
+        }
+
+        // 恢复 event adapter（RTU 新模式下 wrapper 在 open() 时暂停了 event adapter）
+        if (serialPortWrapper != null) {
+            serialPortWrapper.destroy();
+            serialPortWrapper = null;
         }
 
         if (executor != null) {

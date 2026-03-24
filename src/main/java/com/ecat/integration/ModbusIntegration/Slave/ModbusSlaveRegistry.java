@@ -7,6 +7,7 @@ package com.ecat.integration.ModbusIntegration.Slave;
 
 import com.ecat.core.Utils.Log;
 import com.ecat.core.Utils.LogFactory;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import com.serotonin.modbus4j.exception.ModbusInitException;
 
 import java.util.Map;
@@ -60,7 +61,7 @@ public class ModbusSlaveRegistry {
     private final Log log = LogFactory.getLogger(getClass());
     private final Map<String, ModbusSlaveServer> serverMap = new ConcurrentHashMap<>();
 
-    public void register(ModbusSlaveConfig config) {
+    public void register(ModbusSlaveConfig config, SerialSource serialSource) {
         String connectionId = config.getConnectionIdentity();
         int slaveId = config.getSlaveId();
         ModbusDataCallback callback = config.getCallback();
@@ -69,8 +70,8 @@ public class ModbusSlaveRegistry {
             throw new IllegalArgumentException("Callback cannot be null");
         }
 
-        ModbusSlaveServer server = serverMap.computeIfAbsent(connectionId, 
-            id -> new ModbusSlaveServer(config));
+        ModbusSlaveServer server = serverMap.computeIfAbsent(connectionId,
+            id -> new ModbusSlaveServer(config, serialSource));
 
         server.registerCallback(slaveId, callback);
         log.info("Registered slave callback: connectionId=" + connectionId + ", slaveId=" + slaveId);

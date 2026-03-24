@@ -6,6 +6,7 @@ import com.ecat.core.Utils.DynamicConfig.ConfigItem;
 import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
 import com.ecat.core.Utils.DynamicConfig.IntegerValidator;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveConfig;
+import com.ecat.integration.ModbusIntegration.Slave.ModbusSerialSlaveConfig;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveRegistry;
 import com.ecat.integration.SerialIntegration.SerialInfo;
 import com.ecat.integration.SerialIntegration.SerialIntegration;
@@ -132,8 +133,11 @@ public class ModbusIntegration extends IntegrationBase {
         }
 
         ModbusSource sharedSource;
-        if (info instanceof ModbusSerialInfo && serialIntegration != null) {
-            // RTU 新模式：通过 serial integration 管理串口
+        if (info instanceof ModbusSerialInfo) {
+            // RTU 模式：必须通过 serial integration 管理串口
+            if (serialIntegration == null) {
+                throw new IllegalStateException("Serial integration is required for RTU devices but is not available");
+            }
             sharedSource = serialSources.computeIfAbsent(connectionIdentity, k -> {
                 ModbusSerialInfo serialInfo = (ModbusSerialInfo) info;
                 SerialSource serialSource = serialIntegration.register(
@@ -142,10 +146,6 @@ public class ModbusIntegration extends IntegrationBase {
                 source.initSerialMaster(serialInfo, serialSource);
                 return source;
             });
-        } else if (info instanceof ModbusSerialInfo) {
-            // RTU fallback：serial integration 不可用时，使用旧模式（自开串口）
-            sharedSource = serialSources.computeIfAbsent(connectionIdentity,
-                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs));
         } else {
             // TCP 模式
             sharedSource = tcpSources.computeIfAbsent(connectionIdentity,
@@ -196,11 +196,24 @@ public class ModbusIntegration extends IntegrationBase {
 
     /**
      * 注册 Slave 服务
-     * 
+     *
      * @param config Slave 配置
      */
     public void registerSlave(ModbusSlaveConfig config) {
-        slaveRegistry.register(config);
+        SerialSource serialSource = null;
+        if (config instanceof ModbusSerialSlaveConfig) {
+            // RTU 模式：从 serial integration 获取 SerialSource
+            if (serialIntegration == null) {
+                throw new IllegalStateException("Serial integration is required for RTU Slave but is not available");
+            }
+            ModbusSerialSlaveConfig serialConfig = (ModbusSerialSlaveConfig) config;
+            com.ecat.integration.SerialIntegration.SerialInfo serialInfo = new com.ecat.integration.SerialIntegration.SerialInfo(
+                serialConfig.getPortName(), serialConfig.getBaudRate(), serialConfig.getDataBits(),
+                serialConfig.getStopBits(), serialConfig.getParity(), 0, 1000
+            );
+            serialSource = serialIntegration.register(serialInfo, "modbus-slave-" + config.getConnectionIdentity());
+        }
+        slaveRegistry.register(config, serialSource);
     }
 
     /**
