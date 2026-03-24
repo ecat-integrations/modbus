@@ -142,7 +142,7 @@ public class ModbusIntegration extends IntegrationBase {
                 ModbusSerialInfo serialInfo = (ModbusSerialInfo) info;
                 SerialSource serialSource = serialIntegration.register(
                     convertToSerialInfo(serialInfo), "modbus-" + connectionIdentity);
-                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true);
+                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true, false);
                 source.initSerialMaster(serialInfo, serialSource);
                 return source;
             });

@@ -14,19 +14,27 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Modbus Slave 服务注册管理中心
- * 
+ * Modbus Slave 服务注册管理中心（内部组件）
+ *
  * <p>
  * 提供统一的 Slave 服务注册、启动、停止和管理功能。支持同一应用程序
  * 运行多个 Modbus Slave 服务实例（不同连接或不同 SlaveId）。
- * 
+ * </p>
+ *
+ * <p>
+ * <b>注意：本类为 ModbusIntegration 内部组件，外部集成不应直接使用。</b>
+ * 外部集成应通过 {@link com.ecat.integration.ModbusIntegration.ModbusIntegration#registerSlave(
+ * com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveConfig)} 注册 Slave 服务，
+ * 由 ModbusIntegration 统一管理 SerialSource 等底层资源的获取和生命周期。
+ * </p>
+ *
  * <p>
  * 连接标识规则：
  * <ul>
  * <li>TCP: "ipAddress:port"（如 "0.0.0.0:5020"）</li>
  * <li>Serial: "portName"（如 "/dev/ttyUSB0"）</li>
  * </ul>
- * 
+ *
  * <p>
  * 两级索引结构：
  * <pre>
@@ -37,25 +45,28 @@ import java.util.concurrent.ConcurrentHashMap;
  * │           ├── slaveId=1 → CallbackProcessImage → ModbusDataCallback
  * │           └── slaveId=2 → CallbackProcessImage → ModbusDataCallback
  * </pre>
- * 
+ *
  * <p>
- * 使用示例：
+ * 外部集成使用示例（通过 ModbusIntegration）：
  * <pre>{@code
- * ModbusSlaveRegistry registry = new ModbusSlaveRegistry();
- * 
+ * ModbusIntegration modbusIntegration = (ModbusIntegration) core
+ *     .getIntegrationRegistry().getIntegration("integration-modbus");
+ *
  * // 注册 TCP Slave
  * ModbusTcpSlaveConfig config = new ModbusTcpSlaveConfig(1, "0.0.0.0", 5020);
  * config.setCallback(myCallback);
- * registry.register(config);
- * registry.start(config.getConnectionIdentity(), config.getSlaveId());
- * 
- * // 停止所有服务
- * registry.stopAll();
+ * modbusIntegration.registerSlave(config);
+ * modbusIntegration.startSlave(config.getConnectionIdentity(), config.getSlaveId());
+ *
+ * // 停止 Slave
+ * modbusIntegration.stopSlave(config.getConnectionIdentity(), config.getSlaveId());
+ * modbusIntegration.unregisterSlave(config.getConnectionIdentity(), config.getSlaveId());
  * }</pre>
- * 
+ *
  * @author coffee
  * @see ModbusSlaveServer
  * @see ModbusSlaveConfig
+ * @see com.ecat.integration.ModbusIntegration.ModbusIntegration
  */
 public class ModbusSlaveRegistry {
     private final Log log = LogFactory.getLogger(getClass());

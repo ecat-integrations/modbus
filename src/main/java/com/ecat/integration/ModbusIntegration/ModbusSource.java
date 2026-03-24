@@ -70,21 +70,31 @@ public class ModbusSource {
     @Getter
     private ModbusInfo modbusInfo;
     private List<String> registeredIntegrations;
-    private final ExecutorService executor = MdcExecutorService.wrap(Executors.newSingleThreadExecutor());
+    private final ExecutorService executor; // delegateMode 下为 null（不创建线程）
 
     protected ModbusSource(ModbusInfo modbusInfo) {
         this(modbusInfo, Const.DEFAULT_MAX_WAITERS, Const.DEFAULT_WAIT_TIMEOUT_MS); // 默认最大等待请求数为1，等待超时时间为Const.WAIT_TIMEOUT_MS
     }
 
     protected ModbusSource(ModbusInfo modbusInfo, int maxWaiters, int waitTimeoutMs) {
-        this(modbusInfo, maxWaiters, waitTimeoutMs, false);
+        this(modbusInfo, maxWaiters, waitTimeoutMs, false, false);
     }
 
-    protected ModbusSource(ModbusInfo modbusInfo, int maxWaiters, int waitTimeoutMs, boolean skipOpen) {
+    /**
+     * 构造函数
+     *
+     * @param modbusInfo    Modbus 设备信息
+     * @param maxWaiters    最大等待请求数
+     * @param waitTimeoutMs 等待超时时间（毫秒）
+     * @param skipOpen      是否跳过 openModbus()（RTU 新模式跳过，由 initSerialMaster 初始化）
+     * @param delegateMode  是否为委托模式（DeviceSpecificModbusSource 使用，不创建 executor）
+     */
+    protected ModbusSource(ModbusInfo modbusInfo, int maxWaiters, int waitTimeoutMs, boolean skipOpen, boolean delegateMode) {
         this.maxWaiters = maxWaiters; // 设置资源最大等待请求数
         this.waitTimeoutMs = waitTimeoutMs; // 设置资源等待超时时间
         this.modbusInfo = modbusInfo;
         this.registeredIntegrations = new ArrayList<>();
+        this.executor = delegateMode ? null : MdcExecutorService.wrap(Executors.newSingleThreadExecutor());
         if (!skipOpen) {
             openModbus();
         }
@@ -444,7 +454,9 @@ public class ModbusSource {
      */
     protected void destroyResources() {
         ModbusMasterFactory.destroyMaster(modbusMaster);
-        executor.shutdown();
+        if (executor != null) {
+            executor.shutdown();
+        }
     }
 
     public boolean isModbusOpen() {

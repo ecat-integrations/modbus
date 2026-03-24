@@ -62,7 +62,7 @@ import java.util.concurrent.Executors;
 public class ModbusSlaveServer {
     private final Log log = LogFactory.getLogger(getClass());
     private final ModbusSlaveConfig config;
-    private final SerialSource serialSource; // RTU 新模式：来自 serial integration（TCP 为 null）
+    private SerialSource serialSource; // RTU 新模式：来自 serial integration（TCP 为 null），stop() 时 closePort() 并置空
     private ModbusSlaveSet slaveSet;
     private ModbusSerialPortWrapper serialPortWrapper; // RTU 新模式：持有 wrapper 引用，stop 时恢复 event adapter
     private final Map<Integer, CallbackProcessImage> processImageMap = new ConcurrentHashMap<>();
@@ -184,6 +184,12 @@ public class ModbusSlaveServer {
         if (serialPortWrapper != null) {
             serialPortWrapper.destroy();
             serialPortWrapper = null;
+        }
+
+        // 释放 SerialSource（关闭串口），防止串口资源泄漏
+        if (serialSource != null) {
+            serialSource.closePort();
+            serialSource = null;
         }
 
         if (executor != null) {

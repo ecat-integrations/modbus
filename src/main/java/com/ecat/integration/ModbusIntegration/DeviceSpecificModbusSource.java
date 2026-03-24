@@ -27,8 +27,9 @@ public class DeviceSpecificModbusSource extends ModbusSource {
      * @param deviceIdentity 设备唯一标识（用于 closeModbus 时的引用计数）
      */
     public DeviceSpecificModbusSource(ModbusSource delegate, ModbusInfo deviceModbusInfo, String deviceIdentity) {
-        // 调用父类protected构造函数，传入一个临时的ModbusInfo
-        super(delegate.getModbusInfo(), delegate.getMaxWaiters(), delegate.getWaitTimeoutMs(), true);
+        // 调用父类protected构造函数，skipOpen=true（由 delegate 管理 master），
+        // delegateMode=true（不创建自己的 executor，所有操作委托给 delegate）
+        super(delegate.getModbusInfo(), delegate.getMaxWaiters(), delegate.getWaitTimeoutMs(), true, true);
 
         this.delegate = delegate;
         this.deviceModbusInfo = deviceModbusInfo;
