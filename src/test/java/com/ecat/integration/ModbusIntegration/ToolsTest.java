@@ -178,6 +178,24 @@ public class ToolsTest {
     }
 
     /**
+     * 测试 convertBigEndianByteSwapToFloat 方法
+     * 字内字节交换：同一布局既可读 float，也可用 floatToIntBits 得到 long 用的有符号 int。
+     */
+    @Test
+    public void testConvertBigEndianByteSwapFloatSameBitsAsInt32() {
+        // Test case 1
+        short lowWord1 = (short) 0;
+        short highWord1 = (short) 0xe204;
+        int asIntBits = Float.floatToIntBits(Tools.convertBigEndianByteSwapToFloat(lowWord1, highWord1));
+        assertEquals(1250, asIntBits);
+
+        // Test case 2
+        short lowWord2 = (short) 0x803f;
+        short highWord2 = (short) 0;
+        assertEquals(1.0f, Tools.convertBigEndianByteSwapToFloat(lowWord2, highWord2), 1e-6f);
+    }
+
+    /**
      * 测试 convertLittleEndianToInt 方法
      */
     @Test
