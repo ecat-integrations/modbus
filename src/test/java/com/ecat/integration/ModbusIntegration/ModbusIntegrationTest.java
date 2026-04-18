@@ -368,4 +368,105 @@ public class ModbusIntegrationTest {
             throw new RuntimeException(e);
         }
     }
+
+    // ==================== Protocol Conflict Detection Tests ====================
+
+    @Test
+    public void testRegister_tcpAndRtuOverTcp_sameConnection_throwsProtocolConflict() {
+        modbusIntegration.onInit();
+
+        // Register first device with TCP (MBAP) protocol
+        ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        ModbusSource source1 = modbusIntegration.register(tcpInfo, "tcp-device1");
+        assertNotNull(source1);
+
+        // Try to register second device with RTU_OVER_TCP on same ip:port
+        ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
+        try {
+            modbusIntegration.register(rtuInfo, "rtu-device1");
+            fail("Should throw IllegalStateException for protocol conflict");
+        } catch (IllegalStateException e) {
+            assertTrue("Exception message should mention protocol conflict",
+                e.getMessage().contains("协议冲突"));
+            assertTrue("Exception message should contain connection identity",
+                e.getMessage().contains("192.168.1.100:502"));
+            assertTrue("Exception message should mention existing protocol",
+                e.getMessage().contains("TCP"));
+            assertTrue("Exception message should mention new protocol",
+                e.getMessage().contains("RTU_OVER_TCP"));
+        }
+    }
+
+    @Test
+    public void testRegister_rtuOverTcpAndTcp_sameConnection_throwsProtocolConflict() {
+        modbusIntegration.onInit();
+
+        // Register first device with RTU_OVER_TCP protocol
+        ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
+        ModbusSource source1 = modbusIntegration.register(rtuInfo, "rtu-device1");
+        assertNotNull(source1);
+
+        // Try to register second device with TCP on same ip:port
+        ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        try {
+            modbusIntegration.register(tcpInfo, "tcp-device1");
+            fail("Should throw IllegalStateException for protocol conflict");
+        } catch (IllegalStateException e) {
+            assertTrue("Exception message should mention protocol conflict",
+                e.getMessage().contains("协议冲突"));
+            assertTrue("Exception message should mention RTU_OVER_TCP as existing",
+                e.getMessage().contains("RTU_OVER_TCP"));
+            assertTrue("Exception message should mention TCP as new",
+                e.getMessage().contains("TCP"));
+        }
+    }
+
+    @Test
+    public void testRegister_sameRtuOverTcpProtocol_sameConnection_succeeds() {
+        modbusIntegration.onInit();
+
+        // Register two devices with same RTU_OVER_TCP protocol on same connection
+        ModbusTcpInfo rtuInfo1 = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
+        ModbusTcpInfo rtuInfo2 = new ModbusTcpInfo("192.168.1.100", 502, 2, ModbusProtocol.RTU_OVER_TCP);
+
+        ModbusSource source1 = modbusIntegration.register(rtuInfo1, "rtu-device1");
+        ModbusSource source2 = modbusIntegration.register(rtuInfo2, "rtu-device2");
+
+        assertNotNull(source1);
+        assertNotNull(source2);
+        // Both should share the same underlying source
+        assertSame("RTU_OVER_TCP sources should share the same underlying source",
+            source1.getModbusInfo(), source2.getModbusInfo());
+        assertEquals(ModbusProtocol.RTU_OVER_TCP, source1.getModbusInfo().getProtocol());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testRegister_differentProtocol_afterSourceDestroyed_succeeds() throws Exception {
+        modbusIntegration.onInit();
+
+        // Register TCP device
+        ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
+        modbusIntegration.register(tcpInfo, "tcp-device1");
+
+        // Get the shared source and simulate it being destroyed (isModbusOpen=false)
+        Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>)
+            TestTools.getPrivateField(modbusIntegration, "tcpSources");
+        ModbusSource sharedSource = tcpSources.get("192.168.1.100:502");
+        assertNotNull("Shared source should exist", sharedSource);
+
+        // Replace with mock that simulates destroyed state
+        ModbusSource destroyedSource = mock(ModbusSource.class);
+        when(destroyedSource.isModbusOpen()).thenReturn(false);
+        when(destroyedSource.getModbusInfo()).thenReturn(tcpInfo);
+        tcpSources.put("192.168.1.100:502", destroyedSource);
+
+        // Now register RTU_OVER_TCP - should succeed because destroyed source gets cleaned up
+        ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
+        ModbusSource source2 = modbusIntegration.register(rtuInfo, "rtu-device1");
+
+        assertNotNull("Should successfully register after source destroyed", source2);
+        // The new source should have RTU_OVER_TCP protocol
+        assertEquals(ModbusProtocol.RTU_OVER_TCP, source2.getModbusInfo().getProtocol());
+    }
 }

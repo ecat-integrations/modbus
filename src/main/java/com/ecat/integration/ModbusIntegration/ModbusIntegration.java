@@ -130,6 +130,20 @@ public class ModbusIntegration extends IntegrationBase {
         ModbusSource existing = sourceMap.get(connectionIdentity);
         if (existing != null && !existing.isModbusOpen()) {
             sourceMap.remove(connectionIdentity);
+            existing = null;
+        }
+
+        // TCP 模式：同一 TCP 连接只能使用一种帧格式（MBAP 或 RTU over TCP），
+        // 如果已存在连接但协议不匹配，直接拒绝注册，避免帧格式冲突导致通信失败。
+        if (existing != null && info instanceof ModbusTcpInfo) {
+            ModbusProtocol existingProtocol = existing.getModbusInfo().getProtocol();
+            ModbusProtocol newProtocol = info.getProtocol();
+            if (existingProtocol != newProtocol) {
+                throw new IllegalStateException(String.format(
+                    "Modbus TCP 协议冲突: 连接 %s 已被注册为 %s 协议，无法再用 %s 协议注册。"
+                        + "同一 IP:Port 只能使用一种帧格式，请检查设备配置或删除冲突的 ConfigEntry。",
+                    connectionIdentity, existingProtocol, newProtocol));
+            }
         }
 
         ModbusSource sharedSource;
