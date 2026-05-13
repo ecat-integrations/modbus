@@ -104,6 +104,8 @@ public class ModbusMasterFactory {
         } else {
             ipParams.setEncapsulated(false); // 标准 Modbus TCP
         }
-        return factory.createTcpMaster(ipParams, false); // false表示非保持连接
+        ModbusMaster master = factory.createTcpMaster(ipParams, false); // false表示非保持连接
+        master.setTimeout(tcpInfo.getTimeout()); // 设置 TCP 事务超时（毫秒）
+        return master;
     }
 }
