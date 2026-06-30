@@ -180,29 +180,21 @@ public class ModbusLinearConversionAttribute extends LinearConversionAttribute {
     }
 
     /**
-     * 从Modbus读取的寄存器值更新属性
-     * 
+     * 从Modbus读取的寄存器值灌入：寄存器→电压(raw)→工程值。
+     * device 灌入入口。raw 电压存 rawValue，LinearConversionAttribute 自动换算工程值存 attr.value。
+     *
      * @param registerValue 寄存器原始值
      * @return 更新是否成功
      */
-    public boolean updateValue(short registerValue) {
+    public boolean updateRawValue(short registerValue) {
         // 1. 字节序转换（short to int）
         int convertedValue = endianConverter.shortToInt(registerValue);
-        
-        // 2. 应用缩放因子，得到实际电压值
-        double voltageValue = convertedValue / scaleFactor;
-        
-        // 3. 调用父类的updateValue，触发线性转换
-        // LinearConversionAttribute会自动将电压值转换为工程量
-        return super.updateValue(voltageValue);
-    }
 
-    /**
-     * 直接更新电压值（用于测试或特殊场景）
-     */
-    @Override
-    public boolean updateValue(Double voltageValue) {
-        return super.updateValue(voltageValue);
+        // 2. 应用缩放因子，得到实际电压值（raw 信号）
+        double voltageValue = convertedValue / scaleFactor;
+
+        // 3. 灌入 raw 电压，LinearConversionAttribute 自动换算为工程量
+        return updateRawValue(voltageValue);
     }
 
     // Getter方法

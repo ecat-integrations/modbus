@@ -66,15 +66,15 @@ public class ModbusLinearConversionAttributeTest {
         // 测试关键点转换
         
         // 寄存器值1000 → 1V → 0 MPa
-        attr.updateValue((short) 1000);
+        attr.updateRawValue((short) 1000);
         assertEquals("1000寄存器值应转换为0 MPa", 0.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
         
         // 寄存器值3000 → 3V → 5 MPa
-        attr.updateValue((short) 3000);
+        attr.updateRawValue((short) 3000);
         assertEquals("3000寄存器值应转换为5 MPa", 5.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
         
         // 寄存器值5000 → 5V → 10 MPa
-        attr.updateValue((short) 5000);
+        attr.updateRawValue((short) 5000);
         assertEquals("5000寄存器值应转换为10 MPa", 10.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
     }
 
@@ -100,7 +100,7 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 寄存器值2500 → 2.5V → 37.5℃
-        attr.updateValue((short) 2500);
+        attr.updateRawValue((short) 2500);
         assertEquals("2500寄存器值应转换为37.5℃", 37.5, Double.parseDouble(attr.getDisplayValue()), 0.1);
         
         // 检查显示名称
@@ -128,7 +128,7 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 寄存器值7500 → 7.5V → 3.75m
-        attr.updateValue((short) 7500);
+        attr.updateRawValue((short) 7500);
         assertEquals("7500寄存器值应转换为3.75m", 3.75, Double.parseDouble(attr.getDisplayValue()), 0.01);
     }
 
@@ -157,15 +157,15 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 测试第一段：寄存器1500 → 1.5V → 5 L/h
-        attr.updateValue((short) 1500);
+        attr.updateRawValue((short) 1500);
         assertEquals("1500应转换为5", 5.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
         
         // 测试第二段：寄存器3000 → 3V → 45 L/h
-        attr.updateValue((short) 3000);
+        attr.updateRawValue((short) 3000);
         assertEquals("3000应转换为45", 45.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
         
         // 测试第三段：寄存器4500 → 4.5V → 90 L/h
-        attr.updateValue((short) 4500);
+        attr.updateRawValue((short) 4500);
         assertEquals("4500应转换为90", 90.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
     }
 
@@ -191,7 +191,7 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 寄存器5000 ÷ 1000 = 5V → 50 (线性转换: 0-10V → 0-100)
-        attr1000.updateValue((short) 5000);
+        attr1000.updateRawValue((short) 5000);
         assertEquals("5000 ÷ 1000 = 5V → 50", 50.0, 
             Double.parseDouble(attr1000.getDisplayValue()), 0.01);
     }
@@ -240,7 +240,7 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 直接设置电压值（用于测试或特殊场景）
-        attr.updateValue(3.0);  // 3V → 5 MPa
+        attr.updateRawValue(3.0);  // 3V → 5 MPa
         assertEquals("3V应转换为5 MPa", 5.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
     }
 
@@ -263,11 +263,11 @@ public class ModbusLinearConversionAttributeTest {
         );
 
         // 最小值
-        attr.updateValue((short) 1000);  // 1V → 0 MPa
+        attr.updateRawValue((short) 1000);  // 1V → 0 MPa
         assertEquals("最小值", 0.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
         
         // 最大值
-        attr.updateValue((short) 5000);  // 5V → 10 MPa
+        attr.updateRawValue((short) 5000);  // 5V → 10 MPa
         assertEquals("最大值", 10.0, Double.parseDouble(attr.getDisplayValue()), 0.01);
     }
 

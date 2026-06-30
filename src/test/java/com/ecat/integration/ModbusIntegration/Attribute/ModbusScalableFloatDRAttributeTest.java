@@ -1,6 +1,8 @@
 package com.ecat.integration.ModbusIntegration.Attribute;
 
+import com.ecat.core.State.AttributeBase;
 import com.ecat.core.State.AttributeClass;
+import com.ecat.core.State.AttrState;
 import com.ecat.core.State.UnitInfo;
 import com.ecat.integration.ModbusIntegration.ModbusIntegration;
 import com.ecat.integration.ModbusIntegration.ModbusSource;
@@ -22,6 +24,7 @@ import com.serotonin.modbus4j.msg.WriteRegistersResponse;
 import com.ecat.core.EcatCore;
 import com.ecat.core.Task.TaskManager;
 import com.ecat.core.Bus.BusRegistry;
+import com.ecat.core.Bus.event.BusEvent;
 import com.ecat.core.State.AttributeStatus;
 
 /**
@@ -70,8 +73,10 @@ public class ModbusScalableFloatDRAttributeTest {
     private TaskManager mockTaskManager;
     @Mock
     private BusRegistry mockBusRegistry;
-    @Mock 
+    @Mock
     private ModbusIntegration mockModbusIntegration;
+    @Mock
+    private com.ecat.core.Device.DeviceBase mockDevice;
 
     private TestableModbusScalableFloatDRAttribute attr;
 
@@ -94,13 +99,17 @@ public class ModbusScalableFloatDRAttributeTest {
         mockTaskManager = mock(TaskManager.class);
         when(mockEcatCore.getTaskManager()).thenReturn(mockTaskManager);
         mockBusRegistry = mock(BusRegistry.class);
-        doNothing().when(mockBusRegistry).publish(any(), any());
+        doNothing().when(mockBusRegistry).publish(any(BusEvent.class));
         when(mockEcatCore.getBusRegistry()).thenReturn(mockBusRegistry);
 
         attr = new TestableModbusScalableFloatDRAttribute(
                 "id", "ScalableFloatDRAttr", mockAttrClass, mockNativeUnit, mockDisplayUnit, 2,
                 true, true, mockModbusSource, (short) 0x10, mockConverter, scaleFactor
         );
+        // 绑定到 mock 设备：updateValue 才会构建不可变 lastState（device!=null 且 id!=null 时），
+        // getState() 才能取到值（getValue/getStatus 已封装为 protected）
+        when(mockDevice.getId()).thenReturn("testDeviceId");
+        attr.setDevice(mockDevice);
 
     }
     @Test
@@ -123,7 +132,7 @@ public class ModbusScalableFloatDRAttributeTest {
 
         CompletableFuture<Boolean> future = attr.setValue(scaledValue);
         assertTrue(future.get());
-        assertEquals(Float.valueOf(scaledValue), attr.getValue());
+        assertEquals(Float.valueOf(scaledValue), valueOf(attr));
 
         verify(mockConverter, times(1)).intToShorts(testValue);
     }
@@ -170,10 +179,10 @@ public class ModbusScalableFloatDRAttributeTest {
         when(mockConverter.shortsToInt(word1, word2)).thenReturn((int)rawValue);
         // updateValue 应该自动除以 scale
         assertTrue(attr.updateValue(word1, word2));
-        assertEquals(Float.valueOf(rawValue / scaleFactor), attr.getValue());
+        assertEquals(Float.valueOf(rawValue / scaleFactor), valueOf(attr));
         assertTrue(attr.updateValue(word1, word2,AttributeStatus.NORMAL));
-        assertEquals(Float.valueOf(rawValue / scaleFactor), attr.getValue());
-        assertEquals(AttributeStatus.NORMAL, attr.getStatus());
+        assertEquals(Float.valueOf(rawValue / scaleFactor), valueOf(attr));
+        assertEquals(AttributeStatus.NORMAL, statusOf(attr));
     }
 
 
@@ -181,19 +190,31 @@ public class ModbusScalableFloatDRAttributeTest {
     public void testUpdateValueDirect() {
         // Test direct update of value with a float input.
         assertTrue(attr.updateValue(123.45f));
-        assertEquals(Float.valueOf(123.45f), attr.getValue());
+        assertEquals(Float.valueOf(123.45f), valueOf(attr));
     }
 
     @Test
     public void testUpdateValueWithStatus() {
         // Test updating value with status parameter.
-        assertTrue(attr.updateValue(88.88f, null));
-        assertEquals(Float.valueOf(88.88f), attr.getValue());
+        assertTrue(attr.updateValue(88.88f, AttributeStatus.NORMAL));
+        assertEquals(Float.valueOf(88.88f), valueOf(attr));
     }
 
     @Test
     public void testGetDisplayValue_NullValue() {
         // Test getting display value when the attribute value is null.
         assertNull(attr.getDisplayValue(mockDisplayUnit));
+    }
+
+    // 通过不可变 AttrState 读取属性值（getValue() 已封装为 protected）
+    private static Object valueOf(AttributeBase<?> attr) {
+        AttrState s = attr.getState();
+        return s != null ? s.getValue() : null;
+    }
+
+    // 通过不可变 AttrState 读取属性状态（getStatus() 已封装为 protected）
+    private static AttributeStatus statusOf(AttributeBase<?> attr) {
+        AttrState s = attr.getState();
+        return s != null ? s.getStatus() : null;
     }
 }
