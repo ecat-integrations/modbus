@@ -564,6 +564,11 @@ Logger.getLogger(ModbusIntegration.class.getName()).setLevel(Level.FINE);
 
 ## 版本历史
 
+### v3.0.0
+- **对齐 ecat-core 3.0（state-sealing 重构）**：模块版本随 core 大版本对齐到 3.0.0。
+- **`ModbusLinearConversionAttribute` 区分原始信号与工程值**：新增 `updateRawValue(short registerValue)`——原始寄存器值（如电压）写入 `rawValue`（不进 state、不持久化），由 `LinearConversionAttribute` 自动换算为工程值存入 `attr.value`（业务值，进 state、持久化）。**驱动开发者灌寄存器数据时应调 `updateRawValue`，不要直接 `updateValue`**（直接 updateValue 会绕过线性换算）。
+- **总线事件载荷变更**：`device.data.update` 载荷改为 `DeviceDataChangedEvent`（含 old/new 两个不可变 `AttrState`），消费方读 newState，不再反查 live attr。
+
 ### v1.2.0
 - TCP 模式事务超时连通：`ModbusTcpCommConfigSchema.timeout` 字段现在正确传递到 `modbusMaster.setTimeout()`
 - `ModbusTcpInfo` 新增 `timeout` 字段和 5 参数构造函数

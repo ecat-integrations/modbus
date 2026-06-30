@@ -1,6 +1,9 @@
 package com.ecat.integration.ModbusIntegration.Attribute;
 
+import com.ecat.core.State.AttributeBase;
 import com.ecat.core.State.AttributeClass;
+import com.ecat.core.State.AttributeStatus;
+import com.ecat.core.State.AttrState;
 import com.ecat.core.State.UnitInfo;
 import com.ecat.integration.ModbusIntegration.ModbusIntegration;
 import com.ecat.integration.ModbusIntegration.ModbusSource;
@@ -11,6 +14,7 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import com.ecat.core.EcatCore;
 import com.ecat.core.Bus.BusRegistry;
+import com.ecat.core.Bus.event.BusEvent;
 import com.ecat.core.Task.TaskManager;
 
 import java.util.concurrent.CompletableFuture;
@@ -50,8 +54,10 @@ public class ModbusShortAttributeTest {
     private TaskManager mockTaskManager;
     @Mock
     private BusRegistry mockBusRegistry;
-    @Mock 
+    @Mock
     private ModbusIntegration mockModbusIntegration;
+    @Mock
+    private com.ecat.core.Device.DeviceBase mockDevice;
 
     private ModbusShortAttribute attr;
 
@@ -74,13 +80,17 @@ public class ModbusShortAttributeTest {
         when(mockEcatCore.getTaskManager()).thenReturn(mockTaskManager);
 
         mockBusRegistry = mock(BusRegistry.class);
-        doNothing().when(mockBusRegistry).publish(any(), any());
+        doNothing().when(mockBusRegistry).publish(any(BusEvent.class));
         when(mockEcatCore.getBusRegistry()).thenReturn(mockBusRegistry);
 
         attr = new ModbusShortAttribute(
                 "id", "ShortAttr", mockAttrClass, mockNativeUnit, mockDisplayUnit, 0,
                 true, true, mockModbusSource, (short) 0x10
         );
+        // 绑定到 mock 设备：updateValue 才会构建不可变 lastState（device!=null 且 id!=null 时），
+        // getState() 才能取到值（getValue/getStatus 已封装为 protected）
+        when(mockDevice.getId()).thenReturn("testDeviceId");
+        attr.setDevice(mockDevice);
     }
 
     @Test
@@ -94,7 +104,7 @@ public class ModbusShortAttributeTest {
 
         CompletableFuture<Boolean> future = attr.setValue(testValue);
         assertTrue(future.get());
-        assertEquals(Short.valueOf(testValue), attr.getValue());
+        assertEquals(Short.valueOf(testValue), valueOf(attr));
     }
 
     @Test
@@ -106,7 +116,7 @@ public class ModbusShortAttributeTest {
         );
         CompletableFuture<Boolean> future = attr2.setValue((short) 456);
         assertFalse(future.get());
-        assertEquals(null, attr2.getValue());
+        assertEquals(null, valueOf(attr2));
     }
 
     @Test
@@ -133,26 +143,32 @@ public class ModbusShortAttributeTest {
     public void testUpdateValue() {
         // Test updating value from a Modbus register word, verifying data conversion via mockConverter.
         assertTrue(attr.updateValue((short) 456));
-        assertEquals(Short.valueOf((short) 456), attr.getValue());
+        assertEquals(Short.valueOf((short) 456), valueOf(attr));
     }
 
     @Test
     public void testUpdateValueDirect() {
         // Test direct update of value with a short input.
         assertTrue(attr.updateValue((short) 321));
-        assertEquals(Short.valueOf((short) 321), attr.getValue());
+        assertEquals(Short.valueOf((short) 321), valueOf(attr));
     }
 
     @Test
     public void testUpdateValueWithStatus() {
         // Test updating value with status parameter.
-        assertTrue(attr.updateValue((short) 222, null));
-        assertEquals(Short.valueOf((short) 222), attr.getValue());
+        assertTrue(attr.updateValue((short) 222, AttributeStatus.NORMAL));
+        assertEquals(Short.valueOf((short) 222), valueOf(attr));
     }
 
     @Test
     public void testGetDisplayValue_NullValue() {
         // Test getting display value when the attribute value is null.
         assertNull(attr.getDisplayValue(mockDisplayUnit));
+    }
+
+    // 通过不可变 AttrState 读取属性值（getValue() 已封装为 protected）
+    private static Object valueOf(AttributeBase<?> attr) {
+        AttrState s = attr.getState();
+        return s != null ? s.getValue() : null;
     }
 }
