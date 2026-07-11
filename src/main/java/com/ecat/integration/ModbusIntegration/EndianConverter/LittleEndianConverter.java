@@ -3,8 +3,11 @@ package com.ecat.integration.ModbusIntegration.EndianConverter;
 import com.ecat.integration.ModbusIntegration.Tools;
 
 /**
- * 小端序转换器类
- * 
+ * CDAB 字序转换器(低字在前 + 字内大字节序)。封装 {@link Tools#convertLittleEndianToFloat} 等。
+ * <p>类名"Little"承自历史命名,指<b>字序</b>低字在前(非字节序小端 DCBA)——实测锁定为 CDAB,
+ * 见 {@code EndianConverterSemanticsTest#littleEndianDecodesCdabNotDcba}。
+ * {@link ModbusByteWordOrder#CDAB} 经 {@link EndianConverter#forOrder} 复用本类。
+ *
  * @author coffee
  */
 public class LittleEndianConverter extends AbstractEndianConverter {

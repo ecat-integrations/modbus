@@ -32,13 +32,16 @@ public class Tools {
     }
 
     /**
-     * 小端模式浮点数转换（低位寄存器在前，低位字节在前） （ D C B A ）
-     * @param lowWord  低位寄存器值（如0x200）
-     * @param highWord 高位寄存器值（如0x201）
+     * 浮点数转换 = CDAB 字序(低字在前 + 字内大字节序)。
+     * <p>caller 按地址序传 (firstReg=data[offset], secondReg=data[offset+1]),本方法把 firstReg 当低字、
+     * secondReg 当高字,字内按大字节序还原——即 CDAB(低字在前)。旧注释"小端/DCBA/低位字节在前"是误导:
+     * 实测锁定见 {@link EndianConverterSemanticsTest#toolsFloatMethodsActualOrderLabels}(非 DCBA 全反)。
+     * @param lowWord  低位寄存器值(地址低的那个,如0x200)
+     * @param highWord 高位寄存器值(地址高的那个,如0x201)
      * @return float值
      */
     public static float convertLittleEndianToFloat(short lowWord, short highWord) {
-        // 小端模式：[lowWord低字节, lowWord高字节, highWord低字节, highWord高字节]
+        // CDAB:低字(lowWord=firstReg)在前,字内大字节序还原
         byte b0 = (byte) (lowWord & 0xFF);          // 低位寄存器低字节（最低位）
         byte b1 = (byte) ((lowWord >> 8) & 0xFF);   // 低位寄存器高字节
         byte b2 = (byte) (highWord & 0xFF);         // 高位寄存器低字节
@@ -74,13 +77,16 @@ public class Tools {
     }
 
     /**
-     * 小端模式字节交换浮点数转换（ C D A B ）
-     * @param lowWord  低位寄存器值（如0x200）
-     * @param highWord 高位寄存器值（如0x201）
+     * 浮点数转换 = DCBA 字序(低字在前 + 字内小字节序)。caller 按地址序传(firstReg, secondReg) 为 (low, high)。
+     * <p>旧注释标的 "CDAB" 是错的——实测锁定见 {@link EndianConverterSemanticsTest#toolsFloatMethodsActualOrderLabels}(实际 DCBA)。
+     * <p><b>saimosen 气态设备</b>(SO2/CO/NO2/O3)反转参数调此法(传 secondReg, firstReg),净效果 = BADC
+     * (高字在前 + 字内小字节序),见 {@code RealDeviceByteOrderTest#saimosenO3IsBadc}(O3 [0xBF3E,0xFB7C]→0.374 实测)。
+     * @param lowWord  低位寄存器值(地址低的那个,如0x200)
+     * @param highWord 高位寄存器值(地址高的那个,如0x201)
      * @return float值
      */
     public static float convertLittleEndianByteSwapToFloat(short lowWord, short highWord) {
-        // 小端字节交换模式：[lowWord高字节, lowWord低字节, highWord高字节, highWord低字节]
+        // DCBA:低字在前 + 字内小字节序(寄存器内字节交换)
         byte b0 = (byte) ((lowWord >> 8) & 0xFF);   // 低位寄存器高字节（最低位）
         byte b1 = (byte) (lowWord & 0xFF);          // 低位寄存器低字节
         byte b2 = (byte) ((highWord >> 8) & 0xFF);  // 高位寄存器高字节
@@ -187,13 +193,14 @@ public class Tools {
     }
 
     /**
-     * 小端模式整数转换（低位寄存器在前，低位字节在前）
-     * @param lowWord  低位寄存器值
-     * @param highWord 高位寄存器值
+     * 整数转换 = CDAB 字序(低字在前 + 字内大字节序)。同 {@link #convertLittleEndianToFloat} 的 int 版,
+     * 旧注释"小端/低位字节在前"误导(实测=CDAB 非 DCBA,见 EndianConverterSemanticsTest)。
+     * @param lowWord  低位寄存器值(地址低的那个)
+     * @param highWord 高位寄存器值(地址高的那个)
      * @return int值
      */
     public static int convertLittleEndianToInt(short lowWord, short highWord) {
-        // 小端模式：[lowWord低字节, lowWord高字节, highWord低字节, highWord高字节]
+        // CDAB:低字(lowWord=firstReg)在前,字内大字节序还原
         byte b0 = (byte) (lowWord & 0xFF);          // 低位寄存器低字节（最低位）
         byte b1 = (byte) ((lowWord >> 8) & 0xFF);   // 低位寄存器高字节
         byte b2 = (byte) (highWord & 0xFF);         // 高位寄存器低字节

@@ -49,4 +49,28 @@ public interface EndianConverter {
      * @return 整数值
      */
     int shortToInt(short value);
+
+    /**
+     * 按 {@link ModbusByteWordOrder} 取对应的转换器实例(统一工厂,供 mg device 等按用户选的顺序解码)。
+     * <p>契约:返回的 converter 其 {@code shortsToInt/shortsToFloat} 接收 reader 传来的地址顺序两寄存器
+     * {@code (firstReg=data[offset], secondReg=data[offset+1])}。映射:
+     * ABCD→{@link BigEndianConverter}(实测=ABCD)、CDAB→{@link LittleEndianConverter}(实测=CDAB,
+     * 非 DCBA)、BADC→{@link BadcEndianConverter}、DCBA→{@link DcbaEndianConverter}。
+     * @param order 32 位值的字节序×字序
+     * @return 对应转换器(无状态,可放心使用)
+     */
+    static EndianConverter forOrder(ModbusByteWordOrder order) {
+        switch (order) {
+            case ABCD:
+                return AbstractEndianConverter.getBigEndianConverter();
+            case CDAB:
+                return AbstractEndianConverter.getLittleEndianConverter();
+            case BADC:
+                return new BadcEndianConverter();
+            case DCBA:
+                return new DcbaEndianConverter();
+            default:
+                throw new IllegalArgumentException("未知字节序×字序: " + order);
+        }
+    }
 }
