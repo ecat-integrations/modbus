@@ -28,17 +28,48 @@ import com.ecat.core.ConfigFlow.ConfigSchemaProvider;
  *   <li>modbus_protocol - 协议类型（RTU / TCP）</li>
  * </ul>
  *
+ * <p>使用方式：无参构造 → 标准默认值（RTU）；{@link #builder()} → 自定义默认协议。
+ *
  * @author coffee
  */
 public class ModbusCommTypeSchema implements ConfigSchemaProvider {
 
+    private static final String DEFAULT_MODBUS_PROTOCOL = "RTU";
+
+    private final String modbusProtocol;
+
+    /** 无参构造 → 标准默认值（向后兼容）。 */
+    public ModbusCommTypeSchema() {
+        this.modbusProtocol = DEFAULT_MODBUS_PROTOCOL;
+    }
+
+    private ModbusCommTypeSchema(Builder b) {
+        this.modbusProtocol = b.modbusProtocol;
+    }
+
     @Override
     public ConfigSchema createSchema() {
         return new ConfigSchema()
-            .addField(new EnumConfigItem("modbus_protocol", true, "RTU")
+            .addField(new EnumConfigItem("modbus_protocol", true, modbusProtocol)
                 .displayName("Modbus 协议")
                 .addOption("RTU", "Modbus RTU (RS485)")
                 .addOption("TCP", "Modbus TCP")
                 .buildValidator());
+    }
+
+    // ========== Builder ==========
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static class Builder {
+        private String modbusProtocol = DEFAULT_MODBUS_PROTOCOL;
+
+        public Builder modbusProtocol(String modbusProtocol) { this.modbusProtocol = modbusProtocol; return this; }
+
+        public ModbusCommTypeSchema build() {
+            return new ModbusCommTypeSchema(this);
+        }
     }
 }
