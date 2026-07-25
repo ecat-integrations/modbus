@@ -1,10 +1,16 @@
 package com.ecat.integration.ModbusIntegration;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.ecat.core.Utils.TestTools;
 import com.serotonin.modbus4j.ModbusMaster;
+import com.serotonin.modbus4j.exception.ModbusTransportException;
 import com.serotonin.modbus4j.msg.*;
 import org.junit.*;
 import org.mockito.*;
+import org.slf4j.LoggerFactory;
 import java.util.concurrent.*;
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -95,6 +101,44 @@ public class ModbusSourceTest {
 
         CompletableFuture<ReadHoldingRegistersResponse> future = modbusSource.readHoldingRegisters(10, 2);
         assertEquals(response, future.get());
+    }
+
+    /**
+     * 验证读失败时 ERROR 日志包含 modbusInfo（含端口名等连接信息）。
+     * 多设备共总线断开时，需从日志直接定位是哪个物理口故障，而非只看到 slaveId/地址。
+     * 覆盖 readHoldingRegistersWithSlaveId 的 catch 日志拼接（11 处 modbusInfo 追加的代表用例）。
+     */
+    @Test
+    public void testReadFailureLogIncludesModbusInfo() throws Exception {
+        // 真实 ModbusSerialInfo：toString() 含 portName（mock 的 toString 无意义，无法验证端口）
+        ModbusSerialInfo serialInfo = new ModbusSerialInfo("/dev/ttyUSB10", 9600, 8,
+                ModbusSerialInfo.ONE_STOP_BIT, ModbusSerialInfo.NO_PARITY, 2000, 1);
+        // skipOpen=true：RTU 在无 SerialSource 时 openModbus 会抛；delegateMode=false：保留 executor 驱动 supplyAsync
+        ModbusSource source = new ModbusSource(serialInfo, 2, 1000, true, false);
+        TestTools.setPrivateField(source, "modbusMaster", modbusMaster);
+
+        Logger logbackLogger = (Logger) LoggerFactory.getLogger(ModbusSource.class.getName());
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logbackLogger.addAppender(appender);
+        try {
+            when(modbusMaster.send(any(ModbusRequest.class)))
+                    .thenThrow(new ModbusTransportException(1));
+
+            CompletableFuture<?> future = source.readHoldingRegisters(110, 123);
+            assertNull("传输异常时未来应完成为 null（保持现有契约）", future.get());
+
+            String formatted = appender.list.stream()
+                    .filter(e -> e.getLevel() == Level.ERROR)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (a, b) -> a + "\n" + b);
+            assertTrue("ERROR 日志应含 modbusInfo、端口名与 slaveId，实际：\n" + formatted,
+                    formatted.contains("modbusInfo=")
+                            && formatted.contains("/dev/ttyUSB10")
+                            && formatted.contains("slaveId: 1"));
+        } finally {
+            logbackLogger.detachAppender(appender);
+        }
     }
 
     /**

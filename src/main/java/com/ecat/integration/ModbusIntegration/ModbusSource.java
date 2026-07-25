@@ -124,7 +124,8 @@ public class ModbusSource {
                 return (ReadCoilsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error reading coils. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits + ")", e);
+                        " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -137,7 +138,8 @@ public class ModbusSource {
                 return (ReadDiscreteInputsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error reading discrete inputs. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits + ")", e);
+                        " (startAddress: " + startAddress + ", numberOfBits: " + numberOfBits +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -149,7 +151,7 @@ public class ModbusSource {
                 ReadExceptionStatusRequest request = new ReadExceptionStatusRequest(slaveId);
                 return (ReadExceptionStatusResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.error( "Error reading exception status. slaveId: " + slaveId, e);
+                log.error( "Error reading exception status. slaveId: " + slaveId + ", modbusInfo=" + modbusInfo, e);
                 return null;
             }
         }, executor);
@@ -162,7 +164,8 @@ public class ModbusSource {
                 return (ReadHoldingRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error reading holding registers. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters + ")", e);
+                        " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -175,7 +178,8 @@ public class ModbusSource {
                 return (ReadInputRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error reading input registers. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters + ")", e);
+                        " (startAddress: " + startAddress + ", numberOfRegisters: " + numberOfRegisters +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -187,7 +191,7 @@ public class ModbusSource {
                 ReportSlaveIdRequest request = new ReportSlaveIdRequest(slaveId);
                 return (ReportSlaveIdResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
-                log.error( "Error reporting slave ID. slaveId: " + slaveId, e);
+                log.error( "Error reporting slave ID. slaveId: " + slaveId + ", modbusInfo=" + modbusInfo, e);
                 return null;
             }
         }, executor);
@@ -200,7 +204,8 @@ public class ModbusSource {
                 return (WriteCoilResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error writing coil. slaveId: " + slaveId +
-                        " (address: " + address + ", value: " + value + ")", e);
+                        " (address: " + address + ", value: " + value +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -213,7 +218,8 @@ public class ModbusSource {
                 return (WriteCoilsResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error writing coils. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) + ")", e);
+                        " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -226,7 +232,8 @@ public class ModbusSource {
                 return (WriteMaskRegisterResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error writing mask register. slaveId: " + slaveId +
-                        " (address: " + address + ", andMask: " + andMask + ", orMask: " + orMask + ")", e);
+                        " (address: " + address + ", andMask: " + andMask + ", orMask: " + orMask +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -239,7 +246,8 @@ public class ModbusSource {
                 return (WriteRegisterResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error writing register. slaveId: " + slaveId +
-                        " (address: " + address + ", value: " + value + ")", e);
+                        " (address: " + address + ", value: " + value +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
@@ -252,7 +260,8 @@ public class ModbusSource {
                 return (WriteRegistersResponse) modbusMaster.send(request);
             } catch (ModbusTransportException e) {
                 log.error( "Error writing registers. slaveId: " + slaveId +
-                        " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) + ")", e);
+                        " (startAddress: " + startAddress + ", values: " + Arrays.toString(values) +
+                        ", modbusInfo=" + modbusInfo + ")", e);
                 return null;
             }
         }, executor);
