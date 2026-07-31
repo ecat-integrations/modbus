@@ -166,6 +166,52 @@ public class ModbusIntegrationTest {
         }
     }
 
+    /**
+     * 死 source 复用 bug 根源场景回归（bug-record-20260728-170000）。
+     * 场景：旧设备释放同连接的共享 source（closeModbus→destroyResources→executor.shutdown，
+     *      modbus4j master.isInitialized 仍 true、source 留 map），新设备再申请同连接。
+     * 期望：建新源（不复用死源）、死源从 map 清除（无脏数据）、新源 executor 活跃可读。
+     * fix 前：isModbusOpen(dead)=true（stale）→ createOrGetSource 死源清理（!isModbusOpen）失效 → 复用死源
+     *        → readAndUpdate 提交到已 shutdown 的 executor 永不执行 → 无数据，须重启 core 才恢复。
+     */
+    @SuppressWarnings("unchecked")
+    @Test
+    public void createOrGetSource_deadSourceReplacedOnReregister_sameConnection() throws Exception {
+        modbusIntegration.onInit();
+
+        // --- 构造"死源"：曾打开（master.isInitialized=true）后 destroyResources（executor.shutdown）---
+        ModbusTcpInfo info = mock(ModbusTcpInfo.class);
+        when(info.getIpAddress()).thenReturn("127.0.0.1");
+        when(info.getPort()).thenReturn(1699);
+        when(info.getProtocol()).thenReturn(ModbusProtocol.TCP);
+        ModbusSource deadSource = new ModbusSource(info, 2, 1000, true, false);  // skipOpen=true 跳过 openModbus
+        ModbusMaster deadMaster = mock(ModbusMaster.class);
+        when(deadMaster.isInitialized()).thenReturn(true);   // 模拟 destroy 后 stale flag 仍 true（modbus4j 既知）
+        TestTools.setPrivateField(deadSource, "modbusMaster", deadMaster);
+        assertTrue("死源销毁前应 open", deadSource.isModbusOpen());
+        deadSource.destroyResources();   // mock master.destroy 无副作用；executor.shutdown
+        // fix 后 isModbusOpen(dead)=false；fix 前仍 true（bug 根源）
+
+        // 模拟"前一个设备释放后死源仍留 map"
+        Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "tcpSources");
+        tcpSources.put("127.0.0.1:1699", deadSource);
+
+        // 新设备申请同一连接
+        ModbusSource result = (ModbusSource) invokePrivateMethod(modbusIntegration, "createOrGetSource", info, "new-dev-1");
+        assertNotNull(result);
+
+        // --- 断言：脏数据清除 + 新源可用 ---
+        assertFalse("死源必须从 map 移除（脏数据妥善清除，不残留）", tcpSources.containsValue(deadSource));
+        ModbusSource freshShared = tcpSources.get("127.0.0.1:1699");
+        assertNotSame("同连接再申请必须建新源，不得复用死源", deadSource, freshShared);
+        assertNotNull(freshShared);
+        assertTrue("新源须 open（可读）", freshShared.isModbusOpen());
+        java.util.concurrent.ExecutorService freshExecutor =
+                (java.util.concurrent.ExecutorService) TestTools.getPrivateField(freshShared, "executor");
+        assertNotNull(freshExecutor);
+        assertFalse("新源 executor 必须活跃（未继承死源的 shutdown executor，可正常读）", freshExecutor.isShutdown());
+    }
+
     @Test
     public void testRegister_andGetSource_Serial() {
         // Set up mock serial integration

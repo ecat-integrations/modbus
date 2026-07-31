@@ -469,7 +469,14 @@ public class ModbusSource {
     }
 
     public boolean isModbusOpen() {
-        return modbusMaster != null && modbusMaster.isInitialized();
+        // executor 只在 destroyResources() 里 shutdown（唯一调用点），故 isShutdown()==true 即"源已销毁"。
+        // 必须纳入判断：modbus4j 的 modbusMaster.destroy() 不重置 isInitialized flag（既知），
+        // 仅判 master.isInitialized() 会让死 source 仍报 open → createOrGetSource 死源清理（!isModbusOpen）失效
+        // → 同连接后继新设备拿到 executor 已 shutdown 的死 source → readAndUpdate 提交到死 executor 永不执行
+        // → 无数据，须重启 core 才恢复（bug-record-20260728-170000）。
+        // delegateMode 下 executor==null（不创建线程，如 DeviceSpecificModbusSource 委托共享源），视为未 shutdown。
+        return modbusMaster != null && modbusMaster.isInitialized()
+                && (executor == null || !executor.isShutdown());
     }
 
     /**
