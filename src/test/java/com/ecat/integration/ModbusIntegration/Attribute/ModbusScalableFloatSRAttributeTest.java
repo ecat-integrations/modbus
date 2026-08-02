@@ -111,6 +111,7 @@ public class ModbusScalableFloatSRAttributeTest {
         // 绑定到 mock 设备：updateValue 才会构建不可变 lastState（device!=null 且 id!=null 时），
         // getState() 才能取到值（getValue/getStatus 已封装为 protected）
         when(mockDevice.getId()).thenReturn("testDeviceId");
+        when(mockDevice.isReady()).thenReturn(true);   // 硬门禁：READY 才允许 publish
         attr.setDevice(mockDevice);
     }
 
