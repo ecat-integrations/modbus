@@ -93,4 +93,7 @@ public class ModbusSerialInfo extends ModbusInfo {
     public int getStopBits() { return stopBits; }
     public int getParity() { return parity; }
     public int getTimeout() { return timeout; }
+
+    @Override
+    public int getRequestTimeoutMs() { return timeout; }
 }

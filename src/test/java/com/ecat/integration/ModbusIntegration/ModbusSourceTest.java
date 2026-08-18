@@ -66,19 +66,20 @@ public class ModbusSourceTest {
 
     /**
      * 死 source 复用 bug 回归（bug-record-20260728-170000）。
-     * destroyResources() 会 executor.shutdown()；但 modbus4j 的 modbusMaster.destroy() 不重置 isInitialized flag（既知）。
+     * destroyResources() 置 destroyed 标志（P2 后死源显式标志；旧实现为 executor.shutdown()）；
+     * 但 modbus4j 的 modbusMaster.destroy() 不重置 isInitialized flag（既知）。
      * 若 isModbusOpen() 只判 modbusMaster.isInitialized()，死 source 仍报 open → createOrGetSource 的死源清理
-     * （!isModbusOpen()）失效 → 同连接后继新设备拿到 executor 已 shutdown 的死 source → readAndUpdate 提交到死 executor
-     * 永不执行 → 无数据，须重启 core 才恢复。
-     * 故 destroyResources 后（executor shutdown），即使 master.isInitialized 仍 true，isModbusOpen 必须返回 false。
+     * （!isModbusOpen()）失效 → 同连接后继新设备拿到已销毁的死 source → readAndUpdate 提交到死源的事务永不执行
+     * → 无数据，须重启 core 才恢复。
+     * 故 destroyResources 后（destroyed 置位），即使 master.isInitialized 仍 true，isModbusOpen 必须返回 false。
      */
     @Test
     public void isModbusOpen_falseAfterDestroyResources_evenIfMasterStillInitialized() {
         // 模拟 destroy 后 stale flag：modbusMaster.isInitialized() 仍 true
         when(modbusMaster.isInitialized()).thenReturn(true);
         assertTrue("销毁前应 open", modbusSource.isModbusOpen());
-        modbusSource.destroyResources();   // destroyMaster（mock 无副作用）+ executor.shutdown()
-        assertFalse("destroyResources 后 isModbusOpen 必须为 false（executor 已 shutdown）",
+        modbusSource.destroyResources();   // destroyMaster（mock 无副作用）+ destroyed 置位
+        assertFalse("destroyResources 后 isModbusOpen 必须为 false（destroyed 标志已置位）",
                 modbusSource.isModbusOpen());
     }
 

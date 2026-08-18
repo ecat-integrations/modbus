@@ -64,13 +64,11 @@ public class CallbackProcessImage implements ProcessImage {
 
     @Override
     public short getHoldingRegister(int offset) throws IllegalDataAddressException {
-        log.info("getHoldingRegister called: slaveId=" + slaveId + ", offset=" + offset);
         if (callback == null) {
             log.warn("getHoldingRegister: callback is null");
             throw new IllegalDataAddressException();
         }
         short result = callback.onReadHoldingRegister(slaveId, offset);
-        log.info("getHoldingRegister result: offset=" + offset + ", value=" + result);
         // Note: 0 is a valid register value, don't throw exception for it
         return result;
     }

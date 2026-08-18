@@ -124,7 +124,7 @@ public class ModbusIntegration extends IntegrationBase {
         // 统一处理：获取共享的底层source，然后返回设备特定的包装器
         String connectionIdentity = getConnectionIdentity(info);
 
-        // 清理已销毁的 source（最后一个设备 release 后 executor 已 shutdown，
+        // 清理已销毁的 source（最后一个设备 release 后 destroyed 已置位（destroyResources），
         // 但 source 仍留在 map 中，导致 computeIfAbsent 返回死 source）
         Map<String, ModbusSource> sourceMap = (info instanceof ModbusSerialInfo) ? serialSources : tcpSources;
         ModbusSource existing = sourceMap.get(connectionIdentity);
@@ -156,14 +156,14 @@ public class ModbusIntegration extends IntegrationBase {
                 ModbusSerialInfo serialInfo = (ModbusSerialInfo) info;
                 SerialSource serialSource = serialIntegration.register(
                     convertToSerialInfo(serialInfo), "modbus-" + connectionIdentity);
-                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true, false);
+                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true, false, connectionIdentity);
                 source.initSerialMaster(serialInfo, serialSource);
                 return source;
             });
         } else {
-            // TCP 模式
+            // TCP 模式（laneName=connectionIdentity，source 串行车道线程以此命名）
             sharedSource = tcpSources.computeIfAbsent(connectionIdentity,
-                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs));
+                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs, false, false, connectionIdentity));
         }
 
         // 统一返回设备特定的DeviceSpecificModbusSource（传入 identity 用于正确的 close/release）

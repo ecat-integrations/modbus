@@ -104,7 +104,14 @@ public class ModbusMasterFactory {
         } else {
             ipParams.setEncapsulated(false); // 标准 Modbus TCP
         }
-        ModbusMaster master = factory.createTcpMaster(ipParams, false); // false表示非保持连接
+        // keepAlive=true：master 是长生命周期资源，连接建立一次持续复用。
+        // keepAlive=false 时 modbus4j 每个事务都 openConnection/closeConnection，
+        // 每次建连都新建名为 "Modbus4J TcpMaster" 的读线程（TcpMaster.openConnection →
+        // StreamTransport.start），全量轮询下实测线程创建率 ~11/s；32 位 Win2003 部署
+        // 线程硬上限 ≤100，churn 必须归零，故必须保持连接。
+        // 故障恢复走 modbus4j 事务内重连（sendImpl 捕获异常后 openConnection 重发一次，
+        // 重连的是同一 master 实例），master 对象本身只在连接重新注册时才重建。
+        ModbusMaster master = factory.createTcpMaster(ipParams, true);
         master.setTimeout(tcpInfo.getTimeout()); // 设置 TCP 事务超时（毫秒）
         return master;
     }

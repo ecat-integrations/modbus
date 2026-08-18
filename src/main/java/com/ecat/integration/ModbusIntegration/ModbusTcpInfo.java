@@ -78,4 +78,7 @@ public class ModbusTcpInfo extends ModbusInfo {
     public Integer getTimeout() {
         return timeout;
     }
+
+    @Override
+    public int getRequestTimeoutMs() { return timeout; }
 }

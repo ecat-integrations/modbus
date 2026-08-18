@@ -15,6 +15,7 @@ import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusSlaveSet;
 import com.serotonin.modbus4j.exception.ModbusInitException;
 import com.serotonin.modbus4j.ip.tcp.TcpSlave;
+import com.ecat.core.Task.NamedThreadFactory;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -124,7 +125,9 @@ public class ModbusSlaveServer {
         }
 
         running = true;
-        executor = Executors.newSingleThreadExecutor();
+        // 从站服务后台线程：按连接标识命名（非 daemon，与 Executors 默认工厂一致）
+        executor = Executors.newSingleThreadExecutor(
+                new NamedThreadFactory("modbus-slave-" + config.getConnectionIdentity(), false));
         executor.submit(() -> {
             try {
                 log.info("Starting slave server in background thread...");
