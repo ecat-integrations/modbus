@@ -86,6 +86,8 @@ public class ModbusScalableFloatDRAttributeTest {
     public void setUp() {
         MockitoAnnotations.openMocks(this);
         when(mockAttrClass.getDisplayName()).thenReturn("ScalableFloatDRAttr");
+        // 用户侧公共入口 setDisplayValue 经 displayUnit→nativeUnit 换算：mock 恒等（ratio=1）
+        when(mockDisplayUnit.convertUnit(mockNativeUnit)).thenReturn(1.0);
 
         // 深度依赖 mock
         when(mockModbusSource.acquire()).thenReturn("testKey");
@@ -131,7 +133,7 @@ public class ModbusScalableFloatDRAttributeTest {
         when(mockModbusSource.writeRegisters(anyInt(), eq(shorts))).thenReturn(CompletableFuture.completedFuture(mockResponse));
         when(mockResponse.isException()).thenReturn(false);
 
-        CompletableFuture<Boolean> future = attr.setValue(scaledValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(scaledValue));
         assertTrue(future.get());
         assertEquals(Float.valueOf(scaledValue), valueOf(attr));
 
@@ -145,7 +147,7 @@ public class ModbusScalableFloatDRAttributeTest {
                 "id", "ScalableFloatDRAttr", mockAttrClass, mockNativeUnit, mockDisplayUnit, 2,
                 true, false, mockModbusSource, (short) 0x10, mockConverter, scaleFactor
         );
-        CompletableFuture<Boolean> future = attr2.setValue(56.78f);
+        CompletableFuture<Boolean> future = attr2.setDisplayValue(String.valueOf(56.78f));
         assertFalse(future.get());
     }
 
@@ -162,7 +164,7 @@ public class ModbusScalableFloatDRAttributeTest {
 
         when(mockConverter.intToShorts((int)(testValue * scaleFactor))).thenReturn(shorts);
 
-        CompletableFuture<Boolean> future = attr.setValue(new Float(testValue));
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(new Float(testValue)));
         try {
             future.get();
             fail("Should throw RuntimeException");

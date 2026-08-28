@@ -126,16 +126,15 @@ public class ModbusScalableFloatSRAttribute extends ModbusNumericAttributeBase<F
     }
 
     /**
-     * 设置属性值
-     * 实际写入Modbus寄存器的值为：newValue * scaleFactor（经过字节序转换）
-     * 
+     * IO 载荷钩子（22 号 setValue final 化）：设置属性值
+     * 实际写入Modbus寄存器的值为：newValue * scaleFactor（经过字节序转换）；
+     * 确认成功后的本地收尾/记账由 final setValue 入口统一持有
+     *
      * @param newValue 新的属性值
-     * @return 异步操作结果，成功返回true，失败返回false
+     * @return IO 结果 future，成功返回true，失败返回false
      */
-    // IO 写模板（19 号 v2 S3 写闸塌缩后形态）：写帧=SDK 事务体（executeWithLambda 源锁串行+事务硬超时），
-    // 确认成功后才本地收尾发布；失败/超时不发布不残留
     @Override
-    protected CompletableFuture<Boolean> setValue(Float newValue) {
+    protected CompletableFuture<Boolean> setValueImpl(Float newValue) {
         // 计算缩放后的设备值
         float scaledValue = newValue * scaleFactor;
 
@@ -145,17 +144,16 @@ public class ModbusScalableFloatSRAttribute extends ModbusNumericAttributeBase<F
         // 使用字节序转换器将int转换为short
         short writeValue = endianConverter.intToShort(intValue);
 
-        return setValueWithIoBody(newValue, () ->
-            ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
-                source.writeRegister(registerAddress, writeValue)
-                    .thenCompose((response) -> {
-                        if (response == null || response.isException()) {
-                            throw new RuntimeException("命令下发失败: "
-                                    + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
-                        }
-                        return CompletableFuture.completedFuture(true);
-                    })
-            ).join());
+        return ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
+            source.writeRegister(registerAddress, writeValue)
+                .thenCompose((response) -> {
+                    if (response == null || response.isException()) {
+                        throw new RuntimeException("命令下发失败: "
+                                + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
+                    }
+                    return CompletableFuture.completedFuture(true);
+                })
+        );
     }
 
     /**

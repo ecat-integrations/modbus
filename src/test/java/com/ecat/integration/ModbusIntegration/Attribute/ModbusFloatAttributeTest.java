@@ -62,6 +62,8 @@ public class ModbusFloatAttributeTest {
     public void setUp() {
         MockitoAnnotations.openMocks(this);
         when(mockAttrClass.getDisplayName()).thenReturn("FloatAttr");
+        // 用户侧公共入口 setDisplayValue 经 displayUnit→nativeUnit 换算：mock 恒等（ratio=1）
+        when(mockDisplayUnit.convertUnit(mockNativeUnit)).thenReturn(1.0);
         attr = new ModbusFloatAttribute(
                 "id", "名称", mockAttrClass, mockNativeUnit, mockDisplayUnit, 2,
                 true, true, mockModbusSource, (short) 0x10, mockConverter
@@ -100,7 +102,7 @@ public class ModbusFloatAttributeTest {
         when(mockModbusSource.writeRegisters(anyShort(), eq(shorts))).thenReturn(CompletableFuture.completedFuture(mockResponse));
         when(mockResponse.isException()).thenReturn(false);
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         assertTrue(future.get());
         assertEquals(Float.valueOf(testValue), (Float) valueOf(attr), 0.001f);
     }
@@ -112,7 +114,7 @@ public class ModbusFloatAttributeTest {
                 "id", "名称", mockAttrClass, mockNativeUnit, mockDisplayUnit, 2,
                 true, false, mockModbusSource, (short) 0x10, mockConverter
         );
-        CompletableFuture<Boolean> future = attr2.setValue(56.78f);
+        CompletableFuture<Boolean> future = attr2.setDisplayValue(String.valueOf(56.78f));
         assertFalse(future.get());
         assertNull(valueOf(attr2));
     }
@@ -130,7 +132,7 @@ public class ModbusFloatAttributeTest {
 
         when(mockConverter.floatToShorts(testValue)).thenReturn(shorts);
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         try {
             future.get();
             fail("Should throw RuntimeException");

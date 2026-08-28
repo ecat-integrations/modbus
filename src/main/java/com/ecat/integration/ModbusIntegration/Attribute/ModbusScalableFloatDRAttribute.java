@@ -146,25 +146,26 @@ public class ModbusScalableFloatDRAttribute extends ModbusNumericAttributeBase<F
         this.scaleFactor = scaleFactor;
     }
 
-    // IO 写模板（19 号 v2 S3 写闸塌缩后形态）：写帧=SDK 事务体（executeWithLambda 源锁串行+事务硬超时），
-    // 确认成功后才本地收尾发布；失败/超时不发布不残留
+    // IO 载荷钩子（22 号 setValue final 化）：写帧=SDK 事务体（executeWithLambda 源锁串行+
+    // 事务硬超时），事务 CF 直拼返回（发帧在调用线程启动）；确认成功后的本地收尾/记账
+    // 由 final setValue 入口统一持有，本钩子不碰 updateValue/publicState。注意：寄存器写
+    // 缩放后的设备值，属性值（收尾写入的）仍为未缩放的工程值
     @Override
-    protected CompletableFuture<Boolean> setValue(Float newValue) {
+    protected CompletableFuture<Boolean> setValueImpl(Float newValue) {
         // 计算缩放后的设备值
         float scaledValue = newValue * scaleFactor;
 
-        return setValueWithIoBody(newValue, () ->
-            ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
-                short[] resultShorts = endianConverter.intToShorts((int)scaledValue);
-                return source.writeRegisters(registerAddress, resultShorts)
-                        .thenCompose((response) -> {
-                            if (response == null || response.isException()) {
-                                throw new RuntimeException("命令下发失败: "
-                                        + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
-                            }
-                            return CompletableFuture.completedFuture(true);
-                        });
-            }).join());
+        return ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
+            short[] resultShorts = endianConverter.intToShorts((int)scaledValue);
+            return source.writeRegisters(registerAddress, resultShorts)
+                    .thenCompose((response) -> {
+                        if (response == null || response.isException()) {
+                            throw new RuntimeException("命令下发失败: "
+                                    + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
+                        }
+                        return CompletableFuture.completedFuture(true);
+                    });
+        });
     }
 
     /**

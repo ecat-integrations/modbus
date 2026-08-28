@@ -65,6 +65,8 @@ public class ModbusShortAttributeTest {
     public void setUp() {
         MockitoAnnotations.openMocks(this);
         when(mockAttrClass.getDisplayName()).thenReturn("ShortAttr");
+        // 用户侧公共入口 setDisplayValue 经 displayUnit→nativeUnit 换算：mock 恒等（ratio=1）
+        when(mockDisplayUnit.convertUnit(mockNativeUnit)).thenReturn(1.0);
 
         // mock modbusSource 的 acquire() 函数
         when(mockModbusSource.acquire()).thenReturn("testKey");
@@ -103,7 +105,7 @@ public class ModbusShortAttributeTest {
         when(mockModbusSource.writeRegister(anyInt(), eq(shorts))).thenReturn(CompletableFuture.completedFuture(mockResponse));
         when(mockResponse.isException()).thenReturn(false);
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         assertTrue(future.get());
         assertEquals(Short.valueOf(testValue), valueOf(attr));
     }
@@ -115,7 +117,7 @@ public class ModbusShortAttributeTest {
                 "id", "ShortAttr", mockAttrClass, mockNativeUnit, mockDisplayUnit, 0,
                 true, false, mockModbusSource, (short) 0x10
         );
-        CompletableFuture<Boolean> future = attr2.setValue((short) 456);
+        CompletableFuture<Boolean> future = attr2.setDisplayValue(String.valueOf((short) 456));
         assertFalse(future.get());
         assertEquals(null, valueOf(attr2));
     }
@@ -130,7 +132,7 @@ public class ModbusShortAttributeTest {
         when(mockModbusSource.writeRegister(anyInt(), anyInt())).thenReturn(CompletableFuture.completedFuture(mockResponse));
         
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         try {
             future.get();
             fail("Should throw RuntimeException");

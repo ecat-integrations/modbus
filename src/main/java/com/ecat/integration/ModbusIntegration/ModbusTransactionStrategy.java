@@ -105,7 +105,7 @@ public class ModbusTransactionStrategy {
      * {@code scheduleWithFixedDelay(Supplier, ...)} 重载（事务 CF 返回值流出）接入，
      * 本方法保持 fire-and-forget 现状。
      *
-     * <p><b>边界</b>：只供周期轮询任务体使用；属性写（setValueWithIoBody 的 IO 事务体，19 号 v2 S3 写闸塌缩后）与需要有限
+     * <p><b>边界</b>：只供周期轮询任务体使用；属性写（setValueImpl 钩子的 IO 事务体，22 号 setValue final 化后）与需要有限
      * 等待语义的调用方继续走 {@code executeWithLambda}（闸内 IO 体对锁的等待保留）。
      *
      * <p>取锁成功后的事务体/硬超时/release/传输强拆链路与 {@code executeWithLambda} 完全

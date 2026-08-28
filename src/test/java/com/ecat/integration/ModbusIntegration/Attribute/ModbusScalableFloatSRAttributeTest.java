@@ -88,6 +88,8 @@ public class ModbusScalableFloatSRAttributeTest {
     public void setUp() {
         MockitoAnnotations.openMocks(this);
         when(mockAttrClass.getDisplayName()).thenReturn("ScalableFloatSRAttr");
+        // 用户侧公共入口 setDisplayValue 经 displayUnit→nativeUnit 换算：mock 恒等（ratio=1）
+        when(mockDisplayUnit.convertUnit(mockNativeUnit)).thenReturn(1.0);
 
         // 深度依赖 mock
         when(mockModbusSource.acquire()).thenReturn("testKey");
@@ -126,7 +128,7 @@ public class ModbusScalableFloatSRAttributeTest {
         when(mockModbusSource.writeRegister(anyShort(), eq((int)shortValue))).thenReturn(CompletableFuture.completedFuture(mockResponse));
         when(mockResponse.isException()).thenReturn(false);
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         assertTrue(future.get());
         assertEquals(Float.valueOf(testValue), valueOf(attr));
 
@@ -141,7 +143,7 @@ public class ModbusScalableFloatSRAttributeTest {
                 "id", "ScalableFloatSRAttr", mockAttrClass, mockNativeUnit, mockDisplayUnit, 2,
                 true, false, mockModbusSource, (short) 0x10, mockConverter, scaleFactor
         );
-        CompletableFuture<Boolean> future = attr2.setValue(56.78f);
+        CompletableFuture<Boolean> future = attr2.setDisplayValue(String.valueOf(56.78f));
         assertFalse(future.get());
     }
 
@@ -157,7 +159,7 @@ public class ModbusScalableFloatSRAttributeTest {
         when(mockResponse.isException()).thenReturn(true);
         when(mockResponse.getExceptionMessage()).thenReturn("Test Exception");
 
-        CompletableFuture<Boolean> future = attr.setValue(testValue);
+        CompletableFuture<Boolean> future = attr.setDisplayValue(String.valueOf(testValue));
         try {
             future.get();
             fail("Should throw RuntimeException");
