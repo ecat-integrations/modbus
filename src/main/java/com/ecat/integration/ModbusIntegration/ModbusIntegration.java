@@ -88,7 +88,7 @@ public class ModbusIntegration extends IntegrationBase {
     }
 
     @Override
-    public void onRelease() {
+    protected void onReleaseImpl() {
         // 销毁所有共享连接的底层资源（master、serial port）
         // destroyResources() 由 ModbusMasterFactory 统一处理 TCP/RTU 传输资源释放
         tcpSources.values().forEach(source -> source.destroyResources());
