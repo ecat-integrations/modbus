@@ -70,20 +70,22 @@ public class ModbusShortAttribute extends ModbusNumericAttributeBase<Short> {
         this.registerAddress = registerAddress;
     }
 
+    // IO 写模板（19 号 v2 S3 写闸塌缩后形态）：写帧=SDK 事务体（executeWithLambda 源锁串行+事务硬超时），
+    // 确认成功后才本地收尾发布；失败/超时不发布不残留。不得在成功后调 super.setValue
+    // （会二次触发回调/发布），收尾由 setValueWithIoBody 承担
     @Override
     public CompletableFuture<Boolean> setValue(Short newValue) {
-        if (!valueChangeable) {
-            return CompletableFuture.completedFuture(false);
-        }
-        return ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
-            return source.writeRegister(registerAddress, newValue)
+        return setValueWithIoBody(newValue, () ->
+            ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
+                source.writeRegister(registerAddress, newValue)
                     .thenCompose((response) -> {
                         if (response == null || response.isException()) {
-                            throw new RuntimeException("命令下发失败: " + response.getExceptionMessage());
+                            throw new RuntimeException("命令下发失败: "
+                                    + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
                         }
-                        return super.setValue(newValue);
-                    });
-        });
+                        return CompletableFuture.completedFuture(true);
+                    })
+            ).join());
     }
 
     /**

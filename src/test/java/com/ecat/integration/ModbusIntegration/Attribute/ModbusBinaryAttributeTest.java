@@ -116,6 +116,9 @@ public class ModbusBinaryAttributeTest {
         ModbusBinaryAttribute attr2 = new ModbusBinaryAttribute(
                 "id", "BinaryAttr", mockAttrClass, false, mockModbusSource, (int) 0x02
         );
+        // 必须 mock 设备：asyncTurnOn 的 exceptionally 收尾路径会 getDevice().getId() 记日志，
+        // 缺设备时该收尾自身 NPE 掩盖真实的 false 结果
+        attr2.setDevice(mockDevice);
         CompletableFuture<Boolean> future = attr2.asyncTurnOn();
         assertFalse(future.get());
         assertEquals(null, valueOf(attr2));

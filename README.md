@@ -144,6 +144,31 @@ integration-modbus.yml → wait_timeout → ModbusIntegration.waitTimeoutMs → 
 - **CallbackProcessImage**: 将 Modbus4J 请求转发给回调接口
 - **ModbusTcpSlaveConfig / ModbusSerialSlaveConfig**: Slave 配置类
 
+## SDK 快速上手（主动轮询 ModbusPolling，L3 设备仓标准入口）
+
+设备仓的 modbus 周期采集**只走本 SDK**（`Sdk/ModbusPolling`，L2 传输 SDK 层轮询模式的 modbus 形态）——调度（域自持定时池 `Sdk/ModbusSdkTimers`，周期链骨架归 core 库 PeriodicChain——29 号 v2 S1 已脱离 core 调度引擎/resolver）/源锁/锁忙跳过/事务内建硬超时/熔断前置/异常韧性（永不注销）/统一日志全部内置，设备仓的执行词汇只剩 round 函数 + 属性灌入。**canary 实证用法**（批 1 已迁移：environnement-sa、dypsensor）：
+
+```java
+// 设备 start()（environnement-sa EsaDeviceBase / dypsensor DYPA02Device 同款）
+ModbusPolling.on(this, modbusSource)           // this = 设备宿主（RemovalHost），生产唯一形态
+        .round(this::readRegisters)              // 一轮读什么（签名与旧 executePolling lambda 一致，迁移=搬函数体）
+        .every(5, TimeUnit.SECONDS)              // 默认 fixedDelay：完成点+period=下轮；FixedRate 仓加 .fixedRate()
+        .start();                                // 周期链在域自持定时池上自排；句柄内绑宿主生命周期
+
+// readXxx 变 round 契约（usr 模板族 8 仓同款改法）
+CompletableFuture<Boolean> readRegisters(ModbusSource source) {
+    return source.readHoldingRegisters(BLOCK.startAddress, BLOCK.registerCount)
+            .thenApply(resp -> { /* 解析 + attr.updateValue + publicAttrsState */ return true; });
+}
+```
+
+- **round 契约**：`Function<ModbusSource, CompletableFuture<Boolean>>`（严格 Boolean）——true=业务成功，false=业务失败（统一 warn，`BUSINESS_FALSE`），异常=传输错误（统一 error，轮询不注销）；锁忙 SDK 内部消化（`LOCK_BUSY_SKIPPED`，不算失败）。
+- **可选步骤**：`initialDelay(n, unit)`（santak 5s 型首延迟）/ `fixedRate()`（aogan/ebyte/epever/juyingele/zhiqwl 型）/ `named(label)`（zhaorong 校时链定位标签）/ `onRound(Consumer<RoundReport>)`（五分类结局观测——24 个 modbus 族仓的 PollingLockBusySkipTest 回归锁在用，R8 复核保留；连续失败→恢复有断连状态转移行：首败 WARN/恢复 INFO 去重）；round 体内多段块读留隙用 `polling.delay(ms)`（返回到点完成的 CF，saimosen/tianhong 在用）；超时由事务内建硬超时兜底（SDK 级 `timeoutMs` 收紧词汇零消费已删，R8 剃刀）。
+- **调度自持**（29 号 v2 S1）：周期链跑在本仓 `Sdk/ModbusSdkTimers` 域池（daemon 线程 `ecat-modbus-sched-N`，尺寸 2——轮询发起是 µs 级提交，阻塞 IO 全在 ModbusIoPool 16 条；集成 `onRelease` 兜底停机），网格策略（fixedDelay/fixedRate/过期即弃）在 `Sdk/ModbusPollingSchedule`；**不再解析 core 调度引擎，测试零引擎装配**——设备仓单测直接 `start()` 即跑（真池），网格数学确定性断言见 Sdk 包 `ModbusPollingChainTest`（fake 定时缝）。
+- **生命周期**：`on(this, source)` 工厂 host 必填——`start()` 内部经 `RemovalHost.onRemove` 把 cancel 注册进宿主设备的移除动作，设备移除 sweep（`cancelManagedTasks`）时 LIFO 自动执行——设备仓 `stop()/release()` **无需保存句柄、无需 cancel 样板**（cancel 幂等，`cancel(false)` 不中断在飞事务）。测试/独立场景传假宿主（`action -> {}` 或收集断言型）。
+- **何时用哪个模式**：周期读寄存器 → 本 SDK；写命令/有限等待 → 既有 `executeWithLambda`（闸内等待语义保留）；Slave 从机 → `ModbusSlaveServer` 族（不动）。
+- 契约细节与五维+组合单测见 `ModbusPolling` 类 Javadoc 与 `ModbusPollingSdkTest`；迁移操作手册（含测试三类破坏面改写法）见 workspace `arch-review-20260815/30-transport-sdk-survey/09-migration-handbook-v2.md`。
+
 ## 使用场景
 
 ### 场景1：工业自动化系统
@@ -349,6 +374,21 @@ config.put("max_waiters", 5);  // 中等并发场景
 // 推荐配置
 Map<String, Object> config = new HashMap<>();
 config.put("wait_timeout", 3000);  // 3秒超时，适合大多数工业场景
+```
+
+#### IO 旁池线程数 (io_pool_size)
+- **范围**: 1-64
+- **默认值**: 16
+- **作用**: modbus 阻塞事务（master.send 含写+等回音）的专职旁池 `ecat-modbus-io-0..N-1` 定容——
+  引擎调度 worker 只承担发起段（发起即返），响应窗的阻塞等待由旁池线程承接。池满
+  （N 线程全忙且 4×N 排队满）时新事务立即失败（过期即弃，下周期再试）。
+- **建议**: 源数（TCP 连接数 + 串口数）很大或事务时长偏长（慢设备/高重试）时上调；
+  `system_health` 出现大量 RejectedExecutionException 拒绝日志即为扩容信号。
+
+```java
+// 推荐配置
+Map<String, Object> config = new HashMap<>();
+config.put("io_pool_size", 32);  // 40+ 慢速源的场量
 ```
 
 ### 2. 资源管理最佳实践

@@ -58,7 +58,23 @@ public class DeviceSpecificModbusSource extends ModbusSource {
     public String acquire(long timeout, java.util.concurrent.TimeUnit unit) {
         return delegate.acquire(timeout, unit);
     }
-    
+
+    /**
+     * 非阻塞获取锁（轮询专用，E2/R3「过期即弃」）：委托共享 delegate（本类 delegateMode
+     * 不持有锁状态机，与 {@link #acquire()} 同一委托边界）。语义见
+     * {@link ModbusSource#tryAcquire()}。
+     */
+    @Override
+    public String tryAcquire() {
+        return delegate.tryAcquire();
+    }
+
+    /** 累计轮询锁忙放弃计数（委托 delegate 的记账，跨设备共享同一把源锁故同一计数）。 */
+    @Override
+    public long getLockBusySkipCount() {
+        return delegate.getLockBusySkipCount();
+    }
+
     @Override
     public boolean release(String releaseKey) {
         return delegate.release(releaseKey);
@@ -67,6 +83,16 @@ public class DeviceSpecificModbusSource extends ModbusSource {
     @Override
     public int getWaitingCount() {
         return delegate.getWaitingCount();
+    }
+
+    /**
+     * 挂死传输强拆委托给共享 delegate（master/传输资源归 delegate 所有，本类 delegateMode
+     * 不持有）。Q-1/A2：DeviceSpecificModbusSource 与 delegate 共用同一把源锁，事务硬超时
+     * 路径经本类调用时必须落到真实持有传输的 delegate 上。
+     */
+    @Override
+    public void forceRecoverTransport(String reason) {
+        delegate.forceRecoverTransport(reason);
     }
     
     // 直接委托给delegate的带slaveId方法

@@ -5,6 +5,7 @@ import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.DynamicConfig.ConfigItem;
 import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
 import com.ecat.core.Utils.DynamicConfig.IntegerValidator;
+import com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveConfig;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSerialSlaveConfig;
 import com.ecat.integration.ModbusIntegration.Slave.ModbusSlaveRegistry;
@@ -39,6 +40,8 @@ public class ModbusIntegration extends IntegrationBase {
 
     protected Integer maxWaiters; // 新建ModbusSource默认最大等待请求数
     protected Integer waitTimeoutMs; //  新建ModbusSource默认等待超时时间
+    /** modbus IO 旁池线程数（R3 期 4，15 号 §6.4 D4）：阻塞 send 的专职有界池定容。 */
+    protected Integer ioPoolSize;
 
     @Override
     public void onInit() {
@@ -49,13 +52,18 @@ public class ModbusIntegration extends IntegrationBase {
         if(isValid) {
             maxWaiters = (Integer) integrationConfig.getOrDefault("max_waiters", Const.DEFAULT_MAX_WAITERS);
             waitTimeoutMs = (Integer) integrationConfig.getOrDefault("wait_timeout", Const.DEFAULT_WAIT_TIMEOUT_MS);
+            ioPoolSize = (Integer) integrationConfig.getOrDefault("io_pool_size", Const.DEFAULT_IO_POOL_SIZE);
         }
         else{
             log.error("ModbusIntegration configuration is invalid, using default values.");
             maxWaiters = Const.DEFAULT_MAX_WAITERS;
             waitTimeoutMs = Const.DEFAULT_WAIT_TIMEOUT_MS;
+            ioPoolSize = Const.DEFAULT_IO_POOL_SIZE;
         }
-        log.info("ModbusIntegration initialized with maxWaiters: " + maxWaiters + ", waitTimeoutMs: " + waitTimeoutMs);
+        // IO 旁池按配置建池（ecat-modbus-io-0..N-1）；读/写事务的阻塞 send 全部迁入（ModbusSource.dispatchIo）
+        ModbusIoPool.initialize(ioPoolSize);
+        log.info("ModbusIntegration initialized with maxWaiters: " + maxWaiters
+                + ", waitTimeoutMs: " + waitTimeoutMs + ", ioPoolSize: " + ioPoolSize);
 
         // Get serial integration for RTU path
         try {
@@ -81,13 +89,19 @@ public class ModbusIntegration extends IntegrationBase {
 
     @Override
     public void onRelease() {
-        // 销毁所有共享连接的底层资源（master、executor、serial port）
+        // 销毁所有共享连接的底层资源（master、serial port）
         // destroyResources() 由 ModbusMasterFactory 统一处理 TCP/RTU 传输资源释放
         tcpSources.values().forEach(source -> source.destroyResources());
         serialSources.values().forEach(source -> source.destroyResources());
         tcpSources.clear();
         serialSources.clear();
         slaveRegistry.clear();
+        // IO 旁池关停（源全毁后再停池：在途 send 自然跑完，此后新提交拒绝）
+        ModbusIoPool.shutdown();
+        // SDK 定时池最后收口（29 号 v2 S1 域自持调度）：轮询链已先随各宿主 RemovalHost
+        // sweep 停止（消费集成先于依赖集成释放），此处兜底强制停待发单发（幂等、终端态
+        // ——停机后新提交 REE，与 ModbusIoPool/serial/tcp/http 四域统一，见 ModbusSdkTimers）
+        ModbusSdkTimers.shutdown();
     }
 
     public ConfigDefinition getConfigDefinition() {
@@ -97,10 +111,13 @@ public class ModbusIntegration extends IntegrationBase {
             // 设置最大等待数验证范围，1-10
             IntegerValidator maxWaitersValidator = new IntegerValidator(1, 10);
             IntegerValidator waitTimeoutValidator = new IntegerValidator(1000, 10000);
+            // IO 旁池容量 1-64（R3 期 4，15 号 §6.4 D4：默认 16 起步观测调）
+            IntegerValidator ioPoolSizeValidator = new IntegerValidator(1, 64);
 
             ConfigItemBuilder builder = new ConfigItemBuilder()
                 .add(new ConfigItem<>("max_waiters", Integer.class, false, Const.DEFAULT_MAX_WAITERS, maxWaitersValidator))
-                .add(new ConfigItem<>("wait_timeout", Integer.class, false, Const.DEFAULT_WAIT_TIMEOUT_MS, waitTimeoutValidator));
+                .add(new ConfigItem<>("wait_timeout", Integer.class, false, Const.DEFAULT_WAIT_TIMEOUT_MS, waitTimeoutValidator))
+                .add(new ConfigItem<>("io_pool_size", Integer.class, false, Const.DEFAULT_IO_POOL_SIZE, ioPoolSizeValidator));
 
             configDefinition.define(builder);
         }
@@ -156,14 +173,14 @@ public class ModbusIntegration extends IntegrationBase {
                 ModbusSerialInfo serialInfo = (ModbusSerialInfo) info;
                 SerialSource serialSource = serialIntegration.register(
                     convertToSerialInfo(serialInfo), "modbus-" + connectionIdentity);
-                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true, false, connectionIdentity);
+                ModbusSource source = new ModbusSource(serialInfo, maxWaiters, waitTimeoutMs, true, false);
                 source.initSerialMaster(serialInfo, serialSource);
                 return source;
             });
         } else {
-            // TCP 模式（laneName=connectionIdentity，source 串行车道线程以此命名）
+            // TCP 模式（阻塞 send 走 IO 旁池；轮询/写的互斥由源锁承担——19 号 v2 S3 写闸塌缩后无引擎车道键路由）
             sharedSource = tcpSources.computeIfAbsent(connectionIdentity,
-                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs, false, false, connectionIdentity));
+                k -> new ModbusSource(info, maxWaiters, waitTimeoutMs, false, false));
         }
 
         // 统一返回设备特定的DeviceSpecificModbusSource（传入 identity 用于正确的 close/release）

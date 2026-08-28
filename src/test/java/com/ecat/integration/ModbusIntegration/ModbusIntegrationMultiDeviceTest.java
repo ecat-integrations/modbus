@@ -117,6 +117,10 @@ public class ModbusIntegrationMultiDeviceTest {
             modbusIntegration.onPause();
             modbusIntegration.onRelease();
         }
+        // onRelease 已把两池置终端态（R-F：停机后取用 REE）——本 JVM 后续测试类还要
+        // 惰性建池，测试基建层面复位（生产无此路径，remove 后必是新 JVM）
+        ModbusIoPool.resetForTest();
+        com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers.resetForTest();
         if (factoryMock != null) {
             factoryMock.close();
         }

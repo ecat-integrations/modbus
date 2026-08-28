@@ -132,30 +132,30 @@ public class ModbusScalableFloatSRAttribute extends ModbusNumericAttributeBase<F
      * @param newValue 新的属性值
      * @return 异步操作结果，成功返回true，失败返回false
      */
+    // IO 写模板（19 号 v2 S3 写闸塌缩后形态）：写帧=SDK 事务体（executeWithLambda 源锁串行+事务硬超时），
+    // 确认成功后才本地收尾发布；失败/超时不发布不残留
     @Override
     protected CompletableFuture<Boolean> setValue(Float newValue) {
-        if (!valueChangeable) {
-            return CompletableFuture.completedFuture(false);
-        }
-        
         // 计算缩放后的设备值
         float scaledValue = newValue * scaleFactor;
-        
+
         // 将浮点数转换为int（仅取整数部分）
         int intValue = (int) scaledValue;
-        
+
         // 使用字节序转换器将int转换为short
         short writeValue = endianConverter.intToShort(intValue);
-        
-        return ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
-            return source.writeRegister(registerAddress, writeValue)
+
+        return setValueWithIoBody(newValue, () ->
+            ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
+                source.writeRegister(registerAddress, writeValue)
                     .thenCompose((response) -> {
                         if (response == null || response.isException()) {
-                            throw new RuntimeException("命令下发失败: " + response.getExceptionMessage());
+                            throw new RuntimeException("命令下发失败: "
+                                    + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
                         }
-                        return super.setValue(newValue);
-                    });
-        });
+                        return CompletableFuture.completedFuture(true);
+                    })
+            ).join());
     }
 
     /**

@@ -84,8 +84,6 @@ public class ModbusFloatAttributeTest {
 
         TaskManager mockTaskManager = mock(TaskManager.class);
         when(mockEcatCore.getTaskManager()).thenReturn(mockTaskManager);
-        // when(mockTaskManager.getExecutorService()).thenReturn(mockExecutor);
-
         mockBusRegistry = mock(BusRegistry.class);
         doNothing().when(mockBusRegistry).publish(any(BusEvent.class));
         when(mockEcatCore.getBusRegistry()).thenReturn(mockBusRegistry);

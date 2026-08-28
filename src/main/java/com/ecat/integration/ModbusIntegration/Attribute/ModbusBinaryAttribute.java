@@ -58,6 +58,8 @@ public class ModbusBinaryAttribute extends BinaryAttribute {
         this.coilAddress = coilAddress;
     }
 
+    // I-28（11 号 §3.2/§10.1）：写 IO=writeCoil 经 executeWithLambda 源锁事务
+    // （与轮询 executePolling 同锁互斥；发帧在 ModbusIoPool 旁池 per-source FIFO）
     @Override
     protected CompletableFuture<Boolean> asyncTurnOnImpl() {
         boolean newValue = true;

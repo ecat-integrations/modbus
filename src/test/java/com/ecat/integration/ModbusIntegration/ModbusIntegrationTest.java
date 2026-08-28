@@ -93,6 +93,10 @@ public class ModbusIntegrationTest {
             modbusIntegration.onPause();
             modbusIntegration.onRelease();
         }
+        // onRelease 已把两池置终端态（R-F：停机后取用 REE）——本 JVM 后续测试类还要
+        // 惰性建池，测试基建层面复位（生产无此路径，remove 后必是新 JVM）
+        ModbusIoPool.resetForTest();
+        com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers.resetForTest();
         if (factoryMock != null) {
             factoryMock.close();
         }
@@ -207,10 +211,10 @@ public class ModbusIntegrationTest {
         assertNotSame("同连接再申请必须建新源，不得复用死源", deadSource, freshShared);
         assertNotNull(freshShared);
         assertTrue("新源须 open（可读）", freshShared.isModbusOpen());
-        java.util.concurrent.ExecutorService freshExecutor =
-                (java.util.concurrent.ExecutorService) TestTools.getPrivateField(freshShared, "executor");
-        assertNotNull(freshExecutor);
-        assertFalse("新源 executor 必须活跃（未继承死源的 shutdown executor，可正常读）", freshExecutor.isShutdown());
+        java.util.concurrent.ExecutorService freshIoPool =
+                (java.util.concurrent.ExecutorService) TestTools.getPrivateField(freshShared, "ioExecutor");
+        assertNotNull(freshIoPool);
+        assertFalse("新源 IO 旁池必须活跃（池归集成生命周期管理，与单源生死无关）", freshIoPool.isShutdown());
     }
 
     @Test

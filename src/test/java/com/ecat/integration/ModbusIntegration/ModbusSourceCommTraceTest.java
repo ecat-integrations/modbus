@@ -43,7 +43,7 @@ public class ModbusSourceCommTraceTest {
     /** 可直接 new 的测试桩源（构造函数 protected，同包可达）。 */
     static class TestModbusSource extends ModbusSource {
         TestModbusSource(ModbusInfo info) {
-            super(info, 1, 100, true, false, "commtrace-test");
+            super(info, 1, 100, true, false);
         }
 
         void setMaster(ModbusMaster master) {

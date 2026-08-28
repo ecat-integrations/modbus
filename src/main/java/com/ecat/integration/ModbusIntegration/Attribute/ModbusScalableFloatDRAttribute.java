@@ -146,25 +146,25 @@ public class ModbusScalableFloatDRAttribute extends ModbusNumericAttributeBase<F
         this.scaleFactor = scaleFactor;
     }
 
+    // IO 写模板（19 号 v2 S3 写闸塌缩后形态）：写帧=SDK 事务体（executeWithLambda 源锁串行+事务硬超时），
+    // 确认成功后才本地收尾发布；失败/超时不发布不残留
     @Override
     protected CompletableFuture<Boolean> setValue(Float newValue) {
-        if (!valueChangeable) {
-            return CompletableFuture.completedFuture(false);
-        }
-        
         // 计算缩放后的设备值
         float scaledValue = newValue * scaleFactor;
-        
-        return ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
-            short[] resultShorts = endianConverter.intToShorts((int)scaledValue);
-            return source.writeRegisters(registerAddress, resultShorts)
-                    .thenCompose((response) -> {
-                        if (response == null || response.isException()) {
-                            throw new RuntimeException("命令下发失败: " + response.getExceptionMessage());
-                        }
-                        return super.setValue(newValue);
-                    });
-        });
+
+        return setValueWithIoBody(newValue, () ->
+            ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
+                short[] resultShorts = endianConverter.intToShorts((int)scaledValue);
+                return source.writeRegisters(registerAddress, resultShorts)
+                        .thenCompose((response) -> {
+                            if (response == null || response.isException()) {
+                                throw new RuntimeException("命令下发失败: "
+                                        + (response != null ? response.getExceptionMessage() : "无响应(设备离线/传输失败)"));
+                            }
+                            return CompletableFuture.completedFuture(true);
+                        });
+            }).join());
     }
 
     /**
