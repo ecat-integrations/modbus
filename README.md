@@ -169,6 +169,13 @@ CompletableFuture<Boolean> readRegisters(ModbusSource source) {
 - **何时用哪个模式**：周期读寄存器 → 本 SDK；写命令/有限等待 → 既有 `executeWithLambda`（闸内等待语义保留）；Slave 从机 → `ModbusSlaveServer` 族（不动）。
 - 契约细节与五维+组合单测见 `ModbusPolling` 类 Javadoc 与 `ModbusPollingSdkTest`；迁移操作手册（含测试三类破坏面改写法）见 workspace `arch-review-20260815/30-transport-sdk-survey/09-migration-handbook-v2.md`。
 
+### 锁表独立与嵌套取锁纪律（与 serial 的关系）
+
+- **serial 侧守卫不覆盖 modbus**：modbus 的源锁表是独立实现（`ModbusSource.acquire/tryAcquire`，同型拷贝而非共享）。serial 2026-08-29 上线的「同线程嵌套取锁 fail-fast 守卫」（vaisala 事故 SDK 层加固，见 serial README）机制上不触及本仓；modbus 侧无事故证据，按「如非必要勿增实体」暂不加（36 号设计 §五裁决，如需另立）。
+- **纪律同型**：round/事务临界体内（锁已由 `executePolling`/`executeWithLambda` 持有）追加读/写，直接用 SDK 注入的 `source` 调 `readHoldingRegisters`/`writeRegister` 等方法（round 契约本就如此，方法内部不再取锁），**勿再包一层 `executeWithLambda`/`executePolling` 二次取锁**——同线程嵌套取锁同样是自死锁形态（serial 侧已 fail-fast，本仓当前会静默等锁到超时）。
+- 入口选择与 serial 同精神：命令/写事务 → `executeWithLambda`（写闸有限等待语义保留）；周期轮询 → `ModbusPolling`（内部 `executePolling` + `tryAcquire` 锁忙即弃本轮，`LOCK_BUSY_SKIPPED` 不算失败）。
+- 执行器选择纪律（纯内存计时走 core `getBizScheduler`、阻塞 IO 走 `HostedExecutors.bounded(1, 宿主)` 单飞道或改全异步链）与车道化样板见 serial README「执行器选择」节——机制属 core 库与消费方，与本仓锁表无关，消费方纪律一致。
+
 ## 使用场景
 
 ### 场景1：工业自动化系统
