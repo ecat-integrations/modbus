@@ -25,6 +25,7 @@ import com.ecat.core.Device.RemovalHost;
 import com.ecat.core.Utils.TestTools;
 import com.ecat.integration.ModbusIntegration.Sdk.ModbusPolling;
 import com.ecat.integration.ModbusIntegration.Sdk.PollingHandle;
+import com.ecat.integration.ModbusIntegration.Sdk.RoundReport;
 import com.serotonin.modbus4j.ModbusMaster;
 import com.serotonin.modbus4j.msg.ModbusRequest;
 import com.serotonin.modbus4j.msg.ReadHoldingRegistersResponse;
@@ -115,6 +116,9 @@ public class ModbusPollingSdkTest {
      * comm 熔断退役（W3）的补偿观测（与 SerialPolling 同型语义）：连续失败轮（传输异常/
      * 超时/业务 false）只在首败打一行 WARN「link DOWN」，断连后首个 SUCCESS 轮打一行
      * INFO「link RECOVERED」——锁忙轮（LOCK_BUSY_SKIPPED）是内部跳过信号，不改断连态。
+     * 观测点教训（bug-record-20260830-100153）：断言「轮已发起」用 round 体即可；断言
+     * 「结算后可见行为」（日志/状态转移行）必须用结算缝——RECOVERED 行在轮结算尾段
+     * 才 append，round 体内 countDown 与其无同步边。
      */
     @Test
     public void consecutiveFailuresLogOneDownLine_thenOneRecoveryLine() throws Exception {
@@ -140,13 +144,21 @@ public class ModbusPollingSdkTest {
             PollingHandle handle = ModbusPolling.on(host, source)
                     .round(src -> {
                         if (failing.get()) {
-                            threeFailures.countDown(); // 失败轮发起（onRound 观测面零消费已删，round 体即观测点）
+                            threeFailures.countDown(); // 失败轮发起（轮发起类断言：round 体即观测点）
                             CompletableFuture<Boolean> failed = new CompletableFuture<>();
                             failed.completeExceptionally(new IllegalStateException("sim link down"));
                             return failed;
                         }
-                        successRound.countDown();
                         return CompletableFuture.completedFuture(Boolean.TRUE);
+                    })
+                    // 恢复轮观测点 = 结算缝：report() 内 trackLinkState（打 RECOVERED 行）先于
+                    // observer.accept——SUCCESS 结算回调 countDown 时恢复行已 append，latch 的
+                    // happens-before 同时锁住时序与读侧可见性（ListAppender.list 是普通
+                    // ArrayList，无同步边即可能读到旧值——bug-record-20260830-100153）
+                    .onRound(r -> {
+                        if (r.getOutcome() == RoundReport.Outcome.SUCCESS) {
+                            successRound.countDown();
+                        }
                     })
                     .every(PERIOD_MS, TimeUnit.MILLISECONDS)
                     .start();
