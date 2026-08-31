@@ -1,8 +1,18 @@
-# ECAT Modbus 集成模块
+# integration-modbus
+
+> **坐标**: `com.ecat:integration-modbus`
+> **版本**: 3.1.0（见 pom.xml）
+> **依赖**: `ecat-core ^3.1.0`、`integration-ecat-common ^3.0.0`、`integration-serial ^3.0.0`（RTU 路径运行时必需；见 `src/main/resources/ecat-config.yml`）
 
 ## 概述
 
-ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TCP/RTU 访问能力。该模块基于 Modbus4J 库构建，支持多种协议类型，并提供了高效的连接管理和并发控制机制。
+ECAT Modbus 集成模块为所有 ecat-integrations 提供完整的 Modbus TCP/RTU 访问能力，基于 Modbus4J 库构建，提供连接管理（复用/重连/池化）与并发控制（源锁/等待队列/超时）。对外 SDK 能力面共三种模式：
+
+| 模式 | 入口 | 适用 |
+|------|------|------|
+| 主动轮询 | `Sdk/ModbusPolling` | L3 设备仓周期采集的标准入口（调度/锁/韧性内置） |
+| 命令/写事务 | `ModbusTransactionStrategy.executeWithLambda` | 写命令、需要有限等待语义的一次性事务 |
+| Slave 被动应答 | `registerSlave`/`startSlave` + `ModbusDataCallback` | 本系统作为 Modbus 从站，供外部 Master 读写 |
 
 ## 核心特性
 
@@ -21,16 +31,10 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TC
 - **等待队列**: 支持可配置的等待队列长度
 - **超时控制**: 灵活的超时设置，避免无限等待
 
-### ⚙️ 配置灵活
-- **动态配置**: 支持运行时配置修改
-- **参数验证**: 配置参数自动验证，确保参数有效性
-- **默认值**: 提供合理的默认配置值
-
 ### 🖥️ Slave 服务
 - **回调模式**: 通过回调接口处理外部 Master 的读写请求
 - **协议完整**: 支持全部 8 个标准功能码（01-04 读，05-06 单写，15-16 批量写）
 - **双模式**: 同时支持 TCP Slave 和 Serial RTU Slave
-- **设计文档**: [Modbus Slave 设计文档](docs/plans/2026-02-24-modbus-slave-design.md)
 
 ## 架构设计
 
@@ -38,7 +42,7 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TC
 
 #### 1. ModbusIntegration
 主要的集成管理类，负责：
-- Modbus 资源的注册和管理
+- Modbus 资源的注册和管理（`register` / `registerSlave`）
 - TCP 和串行连接池的维护
 - 配置加载和验证
 - 生命周期管理（初始化、启动、暂停、释放）
@@ -68,74 +72,7 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供了完整的 Modbus TC
 - **ModbusTcpInfo**: TCP 连接信息（IP、端口、slaveId、protocol、timeout）
 - **ModbusSerialInfo**: 串行连接信息（串口、波特率、数据位、timeout 等）
 
-#### 6. Timeout 架构详解
-
-Modbus 集成中有两种不同层次的超时机制，分别控制不同的等待行为：
-
-##### 6.1 事务超时（Transaction Timeout）
-
-**含义**：等待 Modbus 从站设备返回响应数据包的最长时间。从 ecat 发送请求帧开始计时，到收到完整响应帧为止。
-
-**配置位置**：
-- **TCP 模式**：`ModbusTcpCommConfigSchema` 的 `timeout` 字段（可选，默认 2000ms，范围 100-30000ms）
-- **RTU 模式**：`SerialCommConfigSchema` 的 `timeout` 字段（可选，默认 500ms，范围 100-60000ms）
-
-**传递链路**：
-```
-TCP: ConfigEntry YAML → comm_settings.timeout → ModbusTcpInfo.timeout → modbusMaster.setTimeout()
-RTU: ConfigEntry YAML → serial_settings.timeout → ModbusSerialInfo.timeout → modbusMaster.setTimeout()
-```
-
-**实际效果**：`modbusMaster.setTimeout()` 控制的是 Modbus4J 库中每次 `send(request)` 调用的响应等待时间。超过此时间未收到响应，Modbus4J 抛出 `ModbusTransportException`。
-
-**RTU 与 TCP 的差异**：
-- RTU 是串行总线半双工通信，主站发送请求后同一总线上只能等待该从站回复，因此事务超时 = 等待设备响应的最长时间。默认 500ms 适合短距离 RS-485 总线；如果波特率低（如 2400）或设备响应慢，需适当增大。
-- TCP 是全双工网络通信，但 Modbus4J 的 TCP 实现仍然是同步请求-响应模型。默认 2000ms 适合局域网内设备；跨网段或互联网场景可能需要更大值。
-
-**连接共享影响**：`ModbusSource` 按 `ip:port`（TCP）或 `portName`（RTU）共享，同一连接上的所有设备共用一个 `ModbusMaster` 实例。第一个创建连接的设备设置 `setTimeout()`，后续共享连接的设备使用相同的超时值。同一连接下的设备通常类型相同、响应速度一致，因此不会产生问题。
-
-##### 6.2 锁等待超时（Lock Wait Timeout）
-
-**含义**：当多个设备共享同一个 Modbus 连接时，排队等待独占访问锁的最长时间。一个设备正在执行 Modbus 事务期间，其他设备必须等待前一个设备完成并释放锁。
-
-**配置位置**：`ModbusIntegration` 集成配置的 `wait_timeout` 字段（可选，默认 2000ms，范围 1000-10000ms）
-
-**传递链路**：
-```
-integration-modbus.yml → wait_timeout → ModbusIntegration.waitTimeoutMs → ModbusSource.acquire(waitTimeoutMs)
-```
-
-**实际效果**：`ModbusSource.acquire()` 使用 `ReentrantLock` + `Condition.await(timeout)` 实现 FIFO 等待队列。如果等待超时仍未获得锁，返回 `null`，`ModbusTransactionStrategy` 将不会执行操作。该超时是**全局配置**，作用于所有 ModbusSource 实例。
-
-##### 6.3 两种超时的协作关系
-
-一次 Modbus 操作的完整耗时 = 锁等待时间 + 事务执行时间：
-
-```
-设备A调用 executeWithLambda()
-  ├─ acquire() 等待锁 ← 锁等待超时控制（wait_timeout）
-  │   ├─ 设备B正在执行事务...
-  │   └─ 设备B完成，释放锁
-  ├─ 获得锁，发送 Modbus 请求
-  └─ 等待设备响应   ← 事务超时控制（timeout）
-      ├─ 收到响应，处理数据
-      └─ release() 释放锁，唤醒下一个等待者
-```
-
-- 如果锁等待超时，操作直接失败（设备未获得执行机会）
-- 如果锁等待成功但事务超时，Modbus4J 抛出 `ModbusTransportException`（设备响应慢或断线）
-
-##### 6.4 超时配置参考值
-
-| 场景 | 事务超时(TCP) | 事务超时(RTU) | 锁等待超时 |
-|------|-------------|-------------|-----------|
-| 局域网内快速设备 | 1000ms | 500ms | 2000ms |
-| 局域网一般设备 | 2000ms（默认） | 1000ms | 3000ms |
-| 跨网段/互联网 | 5000ms | - | 5000ms |
-| 低波特率总线(2400) | - | 2000ms | 3000ms |
-| 多设备高并发 | 2000ms | 1000ms | 5000ms |
-
-#### 7. Modbus Slave 服务组件
+#### 6. Modbus Slave 服务组件
 允许外部 Modbus Master 读写本系统数据：
 
 - **ModbusSlaveRegistry**: Slave 服务注册管理中心
@@ -144,7 +81,32 @@ integration-modbus.yml → wait_timeout → ModbusIntegration.waitTimeoutMs → 
 - **CallbackProcessImage**: 将 Modbus4J 请求转发给回调接口
 - **ModbusTcpSlaveConfig / ModbusSerialSlaveConfig**: Slave 配置类
 
-## SDK 快速上手（主动轮询 ModbusPolling，L3 设备仓标准入口）
+#### 7. 超时机制（要点）
+
+- **事务超时**：等待从站响应帧的时间——TCP 经 ConfigEntry `comm_settings.timeout` 配置，RTU 经 `serial_settings.timeout` 配置
+- **锁等待超时**：共享连接上排队等锁的时间——集成配置 `wait_timeout`（全局）
+- 一次操作的完整耗时 = 锁等待时间 + 事务执行时间
+- 传递链路、协作时序图与场景参考值表见 **[docs/timeout-architecture.md](docs/timeout-architecture.md)**
+
+## SDK 快速上手
+
+### 前置条件
+
+1. **Maven 依赖**：消费方在自己的 pom 声明本模块（scope=provided，运行时由宿主 core 装载），片段见下文「依赖」节。
+2. **获取集成实例与 ModbusSource**：集成实例由 core 装载，设备仓从 IntegrationRegistry 取用；`register` 返回的源按 `ip:port`（TCP）或串口名（RTU）共享复用：
+
+```java
+ModbusIntegration modbus = (ModbusIntegration) core.getIntegrationRegistry()
+        .getIntegration("integration-modbus");
+
+ModbusSource source = modbus.register(
+        new ModbusTcpInfo("192.168.1.100", 502, 1),   // TCP；RTU 用 ModbusSerialInfo
+        "my-device-001");                              // 设备唯一标识
+```
+
+3. **端口分配**：测试与联调环境的设备端口/串口统一走 workspace 端口分配真相源 `.claude/skills/ecat-integration-test-env-prepare/config/port-allocation.json`，勿自选端口（同口冲突会静默丢帧）。
+
+### 主动轮询（ModbusPolling，L3 设备仓标准入口）
 
 设备仓的 modbus 周期采集**只走本 SDK**（`Sdk/ModbusPolling`，L2 传输 SDK 层轮询模式的 modbus 形态）——调度（域自持定时池 `Sdk/ModbusSdkTimers`，周期链骨架归 core 库 PeriodicChain——29 号 v2 S1 已脱离 core 调度引擎/resolver）/源锁/锁忙跳过/事务内建硬超时/熔断前置/异常韧性（永不注销）/统一日志全部内置，设备仓的执行词汇只剩 round 函数 + 属性灌入。**canary 实证用法**（批 1 已迁移：environnement-sa、dypsensor）：
 
@@ -169,6 +131,56 @@ CompletableFuture<Boolean> readRegisters(ModbusSource source) {
 - **何时用哪个模式**：周期读寄存器 → 本 SDK；写命令/有限等待 → 既有 `executeWithLambda`（闸内等待语义保留）；Slave 从机 → `ModbusSlaveServer` 族（不动）。
 - 契约细节与五维+组合单测见 `ModbusPolling` 类 Javadoc 与 `ModbusPollingSdkTest`；迁移操作手册（含测试三类破坏面改写法）见 workspace `arch-review-20260815/30-transport-sdk-survey/09-migration-handbook-v2.md`。
 
+### Slave 被动应答（registerSlave + ModbusDataCallback）
+
+外部 Modbus Master 读写本系统数据时使用：实现回调 → 注册 → 启动三步。回调只覆写需要的功能码，未覆写的走 `AbstractModbusDataCallback` 基类默认拒绝（读返 0 / 写返 false，Master 侧收到异常响应）。
+
+```java
+// ── 1. 定义回调：继承 AbstractModbusDataCallback，只覆写需要的功能码 ──
+public class MySlaveCallback extends AbstractModbusDataCallback {
+    private final Map<Integer, Short> registerImage;   // 地址 → 寄存器值内存映像
+    // 读路径建议走内存映像（读回调高频、不触 IO），映像由轮询/总线事件刷新
+
+    @Override
+    public short onReadHoldingRegister(int slaveId, int address) {          // 功能码 03
+        return registerImage.getOrDefault(address, (short) 0);
+    }
+
+    @Override
+    public boolean onWriteSingleRegister(int slaveId, int address, short value) {  // 功能码 06
+        // 写路径：把值落到目标设备/属性。回调在 modbus4j 协议线程上同步执行，
+        // 内部等待必须有限且不超过 WRITE_CALLBACK_BUDGET_GUIDE_MS（8000ms），
+        // 超时返回 false 让 Master 收到失败响应而非挂死
+        return applyToDevice(address, value);
+    }
+}
+
+// ── 2. 注册并启动（TCP Slave）──
+ModbusTcpSlaveConfig config = new ModbusTcpSlaveConfig(1, "0.0.0.0", 5020);  // slaveId=1，监听 5020
+config.setCallback(new MySlaveCallback());
+modbus.registerSlave(config);
+modbus.startSlave(config.getConnectionIdentity(), config.getSlaveId());
+
+// ── 3. Serial RTU Slave：换配置类，其余三步同上 ──
+// 串口由 registerSlave 内部经 integration-serial 自动注册获取，勿自建 SerialSource
+ModbusSerialSlaveConfig serialConfig = new ModbusSerialSlaveConfig(
+        36, "/dev/ttyUSB0", 9600, 8,
+        ModbusSerialSlaveConfig.ONE_STOP_BIT, ModbusSerialSlaveConfig.NO_PARITY);
+serialConfig.setCallback(new MySlaveCallback());
+modbus.registerSlave(serialConfig);
+modbus.startSlave(serialConfig.getConnectionIdentity(), serialConfig.getSlaveId());
+
+// ── 4. 停止与查态 ──
+modbus.stopSlave(config.getConnectionIdentity(), config.getSlaveId());
+modbus.isSlaveRunning(config.getConnectionIdentity());
+modbus.unregisterSlave(config.getConnectionIdentity(), config.getSlaveId());
+```
+
+- 8 个功能码回调全表见 `Slave/ModbusDataCallback.java`（01-04 读、05/06 单写、15/16 批量写）。
+- **写回调阻塞预算契约**：写回调在 modbus4j 协议线程上同步等待，实现方必须有限等待（指导值 `AbstractModbusDataCallback.WRITE_CALLBACK_BUDGET_GUIDE_MS` = 8000ms），禁止无超时的 `future.get()`；生产级写闸样板见 leitechina `slave/Callback.java`。
+- **生产接线样板**：leitechina `slave/Device.java` 的 `start()`（取集成 → 建回调 → registerSlave → startSlave 全链路）。
+- **可跑验证**：`src/test` 下 `SerialRtuSlaveServerDemo` + `SmartStationDeviceCallback` 配 `SerialRtuMasterClientDemo` 可在 socat 虚拟串口对上跑通 RTU Slave/Master 全链路（见「测试」节）。
+
 ### 锁表独立与嵌套取锁纪律（与 serial 的关系）
 
 - **serial 侧守卫不覆盖 modbus**：modbus 的源锁表是独立实现（`ModbusSource.acquire/tryAcquire`，同型拷贝而非共享）。serial 2026-08-29 上线的「同线程嵌套取锁 fail-fast 守卫」（vaisala 事故 SDK 层加固，见 serial README）机制上不触及本仓；modbus 侧无事故证据，按「如非必要勿增实体」暂不加（36 号设计 §五裁决，如需另立）。
@@ -176,254 +188,109 @@ CompletableFuture<Boolean> readRegisters(ModbusSource source) {
 - 入口选择与 serial 同精神：命令/写事务 → `executeWithLambda`（写闸有限等待语义保留）；周期轮询 → `ModbusPolling`（内部 `executePolling` + `tryAcquire` 锁忙即弃本轮，`LOCK_BUSY_SKIPPED` 不算失败）。
 - 执行器选择纪律（纯内存计时走 core `getBizScheduler`、阻塞 IO 走 `HostedExecutors.bounded(1, 宿主)` 单飞道或改全异步链）与车道化样板见 serial README「执行器选择」节——机制属 core 库与消费方，与本仓锁表无关，消费方纪律一致。
 
-## 使用场景
+## 核心配置
 
-### 场景1：工业自动化系统
+### 集成配置（integration-modbus.yml）
 
-**描述**: 在工厂自动化中，多个传感器和执行器通过 Modbus 网络连接到控制系统。
+| 配置项 | 范围 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `max_waiters` | 1-10 | 3 | 共享连接的锁等待队列长度上限；过高会增加内存消耗 |
+| `wait_timeout` | 1000-10000 ms | 2000 ms | 锁等待超时（全局，作用于所有 ModbusSource） |
+| `io_pool_size` | 1-64 | 16 | modbus 阻塞事务（master.send 含写+等回音）的专职旁池 `ecat-modbus-io-0..N-1` 定容 |
 
-**优势**:
-- 连接复用减少网络负载
-- 并发控制确保数据一致性
-- 自动重连提高系统可靠性
+```yaml
+# integration-modbus.yml 示例
+max_waiters: 3
+wait_timeout: 2000
+io_pool_size: 16
+```
+
+- **io_pool_size 建议**：源数（TCP 连接数 + 串口数）很大或事务时长偏长（慢设备/高重试）时上调；`system_health` 出现大量 `RejectedExecutionException` 拒绝日志即为扩容信号（池满时新事务立即失败，过期即弃，下周期再试）。
+
+### 设备超时配置
+
+- TCP 事务超时：ConfigEntry `comm_settings.timeout`（默认 2000ms）
+- RTU 事务超时：ConfigEntry `serial_settings.timeout`（默认 500ms）
+- 两种超时的职责边界与场景参考值：[docs/timeout-architecture.md](docs/timeout-architecture.md)
+
+## 使用指南
+
+### TCP 多设备共享连接
+
+多个设备注册到同一网关（`ip:port` 相同即共享底层连接，slaveId 按设备区分）：
 
 ```java
-// 创建 Modbus 集成管理器
-ModbusIntegration integration = new ModbusIntegration();
-integration.onInit();
+ModbusTcpInfo tempInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);   // 温度传感器 slaveId=1
+ModbusTcpInfo pressureInfo = new ModbusTcpInfo("192.168.1.100", 502, 2); // 压力传感器 slaveId=2
+// 两个 info 的 ip:port 相同 → 底层 TCP 连接复用；slaveId 各自生效（DeviceSpecificModbusSource）
 
-// 注册多个设备到同一 TCP 网关
-ModbusTcpInfo gatewayInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
-
-// 温度传感器
-ModbusSource tempSensor = integration.register(gatewayInfo, "temp-sensor-001");
-ModbusTransactionStrategy.executeWithLambda(tempSensor, source -> {
-    return source.readHoldingRegisters(0, 2)
+ModbusSource tempSensor = modbus.register(tempInfo, "temp-sensor-001");
+ModbusTransactionStrategy.executeWithLambda(tempSensor, source ->
+    source.readHoldingRegisters(0, 2)
         .thenApply(response -> {
-            if (response != null && response.isValid()) {
+            if (!response.isException()) {
                 short[] values = response.getShortData();
                 double temperature = values[0] * 0.1; // 转换为实际温度
                 System.out.println("温度: " + temperature + "°C");
                 return true;
             }
             return false;
-        });
-});
+        }));
 
-// 压力传感器
-ModbusSource pressureSensor = integration.register(gatewayInfo, "pressure-sensor-001");
-ModbusTransactionStrategy.executeWithLambda(pressureSensor, source -> {
-    return source.readHoldingRegisters(10, 2)
+ModbusSource pressureSensor = modbus.register(pressureInfo, "pressure-sensor-001");
+ModbusTransactionStrategy.executeWithLambda(pressureSensor, source ->
+    source.readHoldingRegisters(10, 2)
         .thenApply(response -> {
-            if (response != null && response.isValid()) {
+            if (!response.isException()) {
                 short[] values = response.getShortData();
-                double pressure = values[0] * 0.01; // 转换为实际压力
+                double pressure = values[0] * 0.01;
                 System.out.println("压力: " + pressure + " MPa");
                 return true;
             }
             return false;
-        });
-});
+        }));
 ```
 
-### 场景2：楼宇自控系统
-
-**描述**: 在智能楼宇中，通过串行总线连接各种设备（照明、空调、门禁等）。
-
-**优势**:
-- 串行连接的高效管理
-- 设备隔离确保安全性
-- 配置灵活适应不同设备
+### 串行总线（RTU）设备控制
 
 ```java
-// 创建串行连接信息
+// 构造参数：portName, baudrate, dataBits, stopBits, parity, timeout(ms), slaveId
 ModbusSerialInfo serialInfo = new ModbusSerialInfo(
-    "COM3", 
-    9600, 
-    ModbusSerialInfo.DATA_BITS_8, 
-    ModbusSerialInfo.STOP_BITS_1, 
-    ModbusSerialInfo.NO_PARITY, 
-    1000, // 超时1秒
-    1      // slaveId
+    "COM3",
+    9600,
+    8,
+    ModbusSerialInfo.ONE_STOP_BIT,
+    ModbusSerialInfo.NO_PARITY,
+    1000, // 事务超时1秒
+    1     // slaveId
 );
 
-// 注册照明控制设备
-ModbusSource lightingControl = integration.register(serialInfo, "lighting-control-001");
-// 控制照明开关
-ModbusTransactionStrategy.executeWithLambda(lightingControl, source -> {
-    return source.writeCoil(0, true)  // 开启照明
+ModbusSource lightingControl = modbus.register(serialInfo, "lighting-control-001");
+ModbusTransactionStrategy.executeWithLambda(lightingControl, source ->
+    source.writeCoil(0, true)  // 开启照明
         .thenApply(response -> {
-            if (response != null && response.isValid()) {
+            if (!response.isException()) {
                 System.out.println("照明控制成功");
                 return true;
             }
             return false;
-        });
-});
+        }));
 
-// 注册空调控制设备
-ModbusSource hvacControl = integration.register(serialInfo, "hvac-control-001");
-// 设置温度设定值
-ModbusTransactionStrategy.executeWithLambda(hvacControl, source -> {
-    return source.writeRegister(0, (short)220)  // 设置22.0°C
+ModbusSource hvacControl = modbus.register(serialInfo, "hvac-control-001");
+ModbusTransactionStrategy.executeWithLambda(hvacControl, source ->
+    source.writeRegister(0, 220)  // 设置22.0°C
         .thenApply(response -> {
-            if (response != null && response.isValid()) {
+            if (!response.isException()) {
                 System.out.println("温度设定成功");
                 return true;
             }
             return false;
-        });
-});
+        }));
 ```
-
-### 场景3：能源管理系统
-
-**描述**: 在能源监控中，同时采集多个电表、水表的数据。
-
-**优势**:
-- 并发采集提高效率
-- 连接复用降低资源消耗
-- 异步处理避免阻塞
-
-```java
-// 配置高并发支持
-Map<String, Object> config = new HashMap<>();
-config.put("max_waiters", 10);      // 最大等待数
-config.put("wait_timeout", 5000);   // 等待超时5秒
-
-// 模拟配置加载
-IntegrationManager manager = mock(IntegrationManager.class);
-when(manager.loadConfig(anyString())).thenReturn(config);
-
-ModbusIntegration integration = new ModbusIntegration();
-TestTools.setPrivateField(integration, "integrationManager", manager);
-integration.onInit();
-
-// 批量注册电表设备
-List<ModbusSource> meters = new ArrayList<>();
-for (int i = 1; i <= 20; i++) {
-    ModbusTcpInfo meterInfo = new ModbusTcpInfo("192.168.1.100", 502, i);
-    ModbusSource meter = integration.register(meterInfo, "electric-meter-" + i);
-    meters.add(meter);
-}
-
-// 并发采集数据
-List<CompletableFuture<Boolean>> futures = new ArrayList<>();
-for (ModbusSource meter : meters) {
-    CompletableFuture<Boolean> future = ModbusTransactionStrategy.executeWithLambda(meter, source -> {
-        return source.readHoldingRegisters(0, 4)
-            .thenApply(response -> {
-                if (response != null && response.isValid()) {
-                    short[] values = response.getShortData();
-                    double energy = (values[0] << 16 | values[1]) * 0.01; // 32位能量值
-                    System.out.println("电表数据: " + energy + " kWh");
-                    return true;
-                }
-                return false;
-            });
-    });
-    futures.add(future);
-}
-
-// 等待所有采集完成
-CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-    .thenRun(() -> System.out.println("所有电表数据采集完成"));
-```
-
-## 优点
-
-### 1. 高效的资源管理
-- **连接复用**: 多个逻辑设备共享同一物理连接，显著减少网络和串口资源消耗
-- **资源池化**: TCP 和串行连接分别管理，提高资源利用率
-- **自动清理**: 生命周期管理确保资源正确释放
-
-### 2. 强大的并发控制
-- **锁机制**: 内置 ReentrantLock 确保线程安全
-- **等待队列**: 支持可配置的等待队列，避免请求丢失
-- **超时控制**: 灵活的超时设置，防止无限等待
-
-### 3. 灵活的配置管理
-- **动态配置**: 支持运行时配置修改
-- **参数验证**: 自动验证配置参数的有效性
-- **默认值**: 提供合理的默认配置，降低使用门槛
-
-### 4. 异步编程支持
-- **CompletableFuture**: 基于 Java 8 的异步编程模型
-- **非阻塞**: 所有操作都是非阻塞的，提高系统响应性
-- **链式调用**: 支持异步操作的链式调用和组合
-
-### 5. 设备隔离和安全性
-- **设备特定包装**: DeviceSpecificModbusSource 确保设备级别的隔离
-- **SlaveId 管理**: 自动处理多设备共享连接时的 slaveId 冲突
-- **错误隔离**: 单个设备的错误不会影响其他设备
 
 ## 使用注意事项
 
-### 1. 配置参数设置
-
-#### 最大等待数 (max_waiters)
-- **范围**: 1-10
-- **默认值**: 3
-- **建议**: 根据系统并发需求调整，过高可能导致内存消耗增加
-
-```java
-// 推荐配置
-Map<String, Object> config = new HashMap<>();
-config.put("max_waiters", 5);  // 中等并发场景
-```
-
-#### 等待超时 (wait_timeout)
-- **范围**: 1000-10000 毫秒
-- **默认值**: 2000 毫秒
-- **建议**: 根据网络延迟和设备响应时间调整
-
-```java
-// 推荐配置
-Map<String, Object> config = new HashMap<>();
-config.put("wait_timeout", 3000);  // 3秒超时，适合大多数工业场景
-```
-
-#### IO 旁池线程数 (io_pool_size)
-- **范围**: 1-64
-- **默认值**: 16
-- **作用**: modbus 阻塞事务（master.send 含写+等回音）的专职旁池 `ecat-modbus-io-0..N-1` 定容——
-  引擎调度 worker 只承担发起段（发起即返），响应窗的阻塞等待由旁池线程承接。池满
-  （N 线程全忙且 4×N 排队满）时新事务立即失败（过期即弃，下周期再试）。
-- **建议**: 源数（TCP 连接数 + 串口数）很大或事务时长偏长（慢设备/高重试）时上调；
-  `system_health` 出现大量 RejectedExecutionException 拒绝日志即为扩容信号。
-
-```java
-// 推荐配置
-Map<String, Object> config = new HashMap<>();
-config.put("io_pool_size", 32);  // 40+ 慢速源的场量
-```
-
-### 2. 资源管理最佳实践
-
-#### 连接注册和释放
-```java
-// 正确的注册方式
-ModbusSource source = integration.register(modbusInfo, "device-001");
-
-// 使用完成后，如果不再需要可以移除
-source.removeIntegration("device-001");
-```
-
-#### 生命周期管理
-```java
-// 应用启动时初始化
-ModbusIntegration integration = new ModbusIntegration();
-integration.onInit();
-integration.onStart();
-
-// 应用关闭时释放资源
-integration.onPause();
-integration.onRelease();
-```
-
-### 3. 并发访问控制
-
-#### ⚠️ 重要：必须使用策略锁机制
+### 1. 并发访问控制：必须经事务策略执行
 
 **为什么必须使用锁机制？**
 
@@ -434,22 +301,20 @@ integration.onRelease();
 3. **SlaveId 冲突**: 多个设备使用不同 slaveId 时，可能出现响应混淆
 4. **连接状态不一致**: 并发操作可能导致连接状态管理混乱
 
-**正确的做法：所有 Modbus 操作都必须通过 `ModbusTransactionStrategy.executeWithLambda` 执行**
+**正确的做法：所有 Modbus 操作都必须通过 `ModbusTransactionStrategy.executeWithLambda` 执行**（周期采集走 `ModbusPolling`，其内部已持锁）。
 
-#### 策略锁使用模式
 ```java
 // ✅ 正确：使用策略锁包装所有操作
-ModbusTransactionStrategy.executeWithLambda(modbusSource, source -> {
-    return source.readHoldingRegisters(0, 10)
+ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
+    source.readHoldingRegisters(0, 10)
         .thenApply(response -> {
-            if (response != null && response.isValid()) {
+            if (!response.isException()) {
                 short[] values = response.getShortData();
                 // 处理数据...
                 return true;
             }
             return false;
-        });
-});
+        }));
 
 // ❌ 错误：直接调用会导致并发问题
 source.readHoldingRegisters(0, 10)
@@ -458,107 +323,74 @@ source.readHoldingRegisters(0, 10)
     });
 ```
 
-#### 直接访问的适用场景
+### 2. 错误处理
 
-**只有在以下特殊情况下才考虑直接访问：**
+响应异常（从站返回异常码）与传输错误（超时/断线）经不同路径到达——前者在响应对象上，后者以异常完成 future：
 
-1. **独占访问**: 确保只有一个线程会访问该 ModbusSource 底层端口或连接
-   ```java
-   // 在单线程或确保独占的情况下
-   synchronized (modbusSource) {
-       source.readHoldingRegisters(0, 10)
-           .thenAccept(response -> {
-               // 处理响应
-           });
-   }
-   ```
-
-2. **超高频读取**: 当读取频率极高，且能确保没有其他并发访问时
-   ```java
-   // 适用于专用的读取线程
-   ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-   scheduler.scheduleAtFixedRate(() -> {
-       source.readHoldingRegisters(0, 10)
-           .thenAccept(response -> {
-               // 高频读取处理
-           });
-   }, 0, 100, TimeUnit.MILLISECONDS); // 每100ms读取一次
-   ```
-
-**⚠️ 注意**: 即使在上述场景中，仍建议使用策略锁机制以确保安全性。
-
-
-### 4. 错误处理和异常情况
-
-#### 连接失败处理
 ```java
-source.readHoldingRegisters(0, 10)
-    .thenAccept(response -> {
-        if (response == null) {
-            System.err.println("读取失败：连接异常");
-        } else if (!response.isValid()) {
-            System.err.println("读取失败：响应无效");
-        } else {
-            // 正常处理响应
+ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
+    source.readHoldingRegisters(0, 10)
+        .thenApply(response -> {
+            if (response.isException()) {
+                throw new IllegalStateException("从站异常响应: " + response.getExceptionMessage());
+            }
             short[] values = response.getShortData();
-            // ...
-        }
+            // ...解析数据
+            return true;
+        }))
+    .exceptionally(ex -> {                 // 传输错误/锁等待失败经异常完成
+        System.err.println("读取失败: " + ex.getMessage());
+        return false;
     });
 ```
 
-### 5. 性能优化建议
+### 3. 资源与生命周期管理
 
-#### 连接复用
 ```java
-// 推荐：多个设备使用相同连接信息
-ModbusTcpInfo sharedInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
+// 正确的注册方式：每个设备使用唯一 identity
+ModbusSource source = modbus.register(modbusInfo, "unique-device-001");
 
-ModbusSource device1 = integration.register(sharedInfo, "device-001");
-ModbusSource device2 = integration.register(sharedInfo, "device-002");
-// device1 和 device2 共享同一个 TCP 连接
+// 设备移除时解除占用（最后一个占用者释放时底层连接销毁）
+source.removeIntegration("unique-device-001");
 ```
 
-#### 批量操作
+集成自身的生命周期（onInit/onStart/onPause/onRelease）由 core 框架管理，消费仓不直接调用。
+
+### 4. 性能优化建议
+
+以下片段仅示意批量读 API 的形态；实际调用须经 `executeWithLambda` / `ModbusPolling` 持锁执行。
+
 ```java
 // 推荐：批量读取减少网络往返
-CompletableFuture<ReadHoldingRegistersResponse> future = 
+CompletableFuture<ReadHoldingRegistersResponse> future =
     source.readHoldingRegisters(0, 20); // 一次性读取20个寄存器
-```
 
-#### 异步处理
-```java
-// 推荐：使用异步处理提高并发性能
+// 推荐：一轮事务内并行发起多段读（锁已由事务策略持有）
 List<CompletableFuture<?>> futures = new ArrayList<>();
-
 futures.add(source.readHoldingRegisters(0, 10));
 futures.add(source.readInputRegisters(20, 5));
 futures.add(source.readCoils(100, 8));
-
-// 等待所有操作完成
 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
     .thenRun(() -> System.out.println("所有操作完成"));
 ```
 
-### 6. 安全注意事项
-
-#### 设备隔离
-```java
-// 每个设备使用唯一的 identity
-ModbusSource device1 = integration.register(modbusInfo, "unique-device-001");
-ModbusSource device2 = integration.register(modbusInfo, "unique-device-002");
-```
-
-#### 资源清理
-```java
-// 应用退出时确保资源释放
-Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-    integration.onRelease();
-}));
-```
-
 ## 依赖
 
-### 核心依赖
+### 消费方接入
+
+在自己的集成 pom 中声明（scope=provided，运行时由宿主 core 装载本模块）：
+
+```xml
+<dependency>
+    <groupId>com.ecat</groupId>
+    <artifactId>integration-modbus</artifactId>
+    <version>3.1.0</version>
+    <scope>provided</scope>
+</dependency>
+```
+
+### 底层库
+
 - **Modbus4J**: 开源的 Modbus 通信库
   ```xml
   <dependency>
@@ -573,13 +405,43 @@ Runtime.getRuntime().addShutdownHook(new Thread(() -> {
 - **内存**: 建议 512MB 以上可用内存
 - **网络**: 支持 TCP/IP 或串行通信
 
+## 构建
+
+```bash
+mvn clean install -f ecat-integrations/modbus/pom.xml
+```
+
+## 测试
+
+```bash
+mvn test -f ecat-integrations/modbus/pom.xml
+```
+
+关键测试类：
+- `ModbusPollingSdkTest` / `ModbusPollingChainTest` — 轮询 SDK 契约与网格数学（fake 定时缝，确定性断言）
+- `ModbusTransactionStrategyTest` / `ModbusTransactionStrategyHardTimeoutTest` — 事务策略与事务级硬超时
+- `ModbusSlaveRegistryTest` / `ModbusTcpSlaveConfigTest` — Slave 注册与配置校验
+- `ModbusWedgeRecoveryContractTest` / `ModbusApplyWedgeRecoveryTest` — 卡死恢复契约
+- `EndianConverterSemanticsTest` / `FourOrderEndianConverterTest` — 字节序换算语义
+
+**RTU Slave/Master 本地全链路验证**（无需真实设备）：
+
+```bash
+# 1. 创建虚拟串口对
+sudo socat -d -d pty,raw,echo=0,link=/dev/ttyV0 pty,raw,echo=0,link=/dev/ttyV1
+# 2. 先跑 Slave Demo（占用 /dev/ttyV0）
+# 3. 再跑 Master Client Demo（占用 /dev/ttyV1）
+```
+
+对应 Demo：`src/test` 下 `SerialRtuSlaveServerDemo`（Slave 端，配 `SmartStationDeviceCallback` 模拟智慧站房设备）与 `SerialRtuMasterClientDemo`（Master 端）。
+
 ## 故障排除
 
 ### 常见问题
 
 #### 1. 连接失败
 **现象**: 无法建立 Modbus 连接
-**解决**: 
+**解决**:
 - 检查网络连接和设备地址
 - 验证端口和协议设置
 - 确认设备电源和通信状态
@@ -634,6 +496,12 @@ Logger.getLogger(ModbusIntegration.class.getName()).setLevel(Level.FINE);
 - 实现连接复用和并发控制
 - 提供完整的异步操作接口
 
+## 相关文档
+
+- [docs/timeout-architecture.md](docs/timeout-architecture.md) — 两种超时的职责边界、传递链路与场景参考值
+- [docs/plans/2026-02-24-modbus-slave-design.md](docs/plans/2026-02-24-modbus-slave-design.md) — Slave 设计文档（**注意**：其中回调示例为旧签名——`onReadHoldingRegister` 返回 `byte[]`；现行签名返回 `short`，以 `Slave/ModbusDataCallback.java` 与本文「快速上手」节为准）
+- [docs/MULTI_DEVICE_SOLUTION.md](docs/MULTI_DEVICE_SOLUTION.md) — 多设备共享连接（DeviceSpecificModbusSource）方案
+
 ## 许可证
 
 本项目采用 Apache License 2.0，详见 LICENSE 文件。
@@ -646,4 +514,3 @@ Logger.getLogger(ModbusIntegration.class.getName()).setLevel(Level.FINE);
 ### 许可证获取
 - ECAT Core 完整许可证：https://github.com/ecat-project/ecat-core/blob/main/LICENSE
 - 本插件许可证：./LICENSE
-
