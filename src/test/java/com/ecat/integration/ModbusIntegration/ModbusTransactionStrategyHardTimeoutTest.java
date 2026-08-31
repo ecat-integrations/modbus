@@ -39,8 +39,12 @@ import org.junit.Test;
  */
 public class ModbusTransactionStrategyHardTimeoutTest {
 
-    /** 测试用请求超时；硬超时上限 = requestTimeoutMs × BOUNDED_READ_WAIT_FACTOR */
-    private static final int TEST_REQUEST_TIMEOUT_MS = 100;
+    /**
+     * 测试用请求超时；硬超时上限 = requestTimeoutMs × BOUNDED_READ_WAIT_FACTOR。
+     * 被测=硬超时触发 release/强拆的机制本身，量级任意：50ms × 6 = 300ms 上限，
+     * 断言窗口随 hardTimeoutMs 派生值自动缩放（超时总量 ≥ 链总和语义不变）。
+     */
+    private static final int TEST_REQUEST_TIMEOUT_MS = 50;
 
     /**
      * 【RED：Q-1/A2 幽灵锁】send future 永不 complete（= 车道线程钉死在挂死的 master.send 上）时，

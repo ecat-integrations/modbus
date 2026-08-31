@@ -12,6 +12,7 @@ import org.junit.*;
 import org.mockito.*;
 import org.slf4j.LoggerFactory;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -204,7 +205,7 @@ public class ModbusSourceTest {
      */
     @Test
     public void testAcquireQueueOverflow() throws Exception {
-        final ModbusSource source = new ModbusSource(tcpInfo, 1, 300);
+        final ModbusSource source = new ModbusSource(tcpInfo, 1, 100);
         TestTools.setPrivateField(source, "modbusMaster", modbusMaster);
         TestTools.setPrivateField(source, "modbusInfo", tcpInfo);
 
@@ -318,15 +319,41 @@ public class ModbusSourceTest {
     }
 
     /**
-     * 测试获取等待队列长度
+     * 测试获取等待队列长度：超时等待者必须已从 waitQueue 自行摘除（死 key 防线）。
+     *
+     * <p>原形态为同线程双 acquire + sleep(200)：第二个 acquire 在本线程 park 满
+     * waitTimeoutMs(1000ms) 后超时自行摘除，测量时队列恒为 0，断言 0≤x≤1 永真（无检出力）。
+     *
+     * <p>重写语义（以源码为准）：getWaitingCount()=waitQueue.size()=当前 park 中的等待者数。
+     * 确定性可观测态 = 等待者超时摘除自身后精确为 0（ModbusSource.acquire 超时分支
+     * waitQueue.remove）；「park 中途 ==1」只能靠竞态采样观测，违背确定性同步纪律，故取 ==0。
+     * 辅助线程持锁经 latch 确认（等事件已发生，不猜时间）；本线程用显式 150ms 短超时
+     * acquire 替代原默认 1000ms park。
      */
     @Test
-    public void testGetWaitingCount() throws InterruptedException {
-        modbusSource.acquire();
-        modbusSource.acquire();
-        Thread.sleep(200);
-        // 队列长度可能为0或1，取决于线程调度
-        int waitingCount = modbusSource.getWaitingCount();
-        assertTrue(waitingCount >= 0 && waitingCount <= 1);
+    public void testGetWaitingCount() throws Exception {
+        // 辅助线程持锁（生产形态：持锁者恒为别的事务线程），latch 确保持锁在先
+        final CountDownLatch held = new CountDownLatch(1);
+        final AtomicReference<String> heldKey = new AtomicReference<>();
+        Thread holder = new Thread(() -> {
+            heldKey.set(modbusSource.acquire());
+            held.countDown();
+        }, "modbus-test-lock-holder");
+        holder.setDaemon(true);
+        holder.start();
+        assertTrue("持锁辅助线程必须在期限内取得锁", held.await(5, TimeUnit.SECONDS));
+        assertNotNull("持锁 key 不应为 null", heldKey.get());
+
+        // 本线程短超时 acquire：锁忙进 waitQueue park，超时返回 null 前已自行摘除
+        String busyKey = modbusSource.acquire(150, TimeUnit.MILLISECONDS);
+        assertNull("锁被持有时 acquire 应超时返回 null", busyKey);
+        assertEquals("超时等待者必须已从等待队列摘除（无死 key 残留）",
+                0, modbusSource.getWaitingCount());
+
+        // 释放辅助线程持有的锁；无 waiter 泄漏时快速路径立即可得
+        assertTrue(modbusSource.release(heldKey.get()));
+        String next = modbusSource.acquire(200, TimeUnit.MILLISECONDS);
+        assertNotNull("释放后应立即可再次取得锁（无残留 waiter 干扰）", next);
+        modbusSource.release(next);
     }
 }

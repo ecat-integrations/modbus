@@ -79,10 +79,10 @@ public class TcpMasterLifecycleTest {
     @Test
     public void blackholeFailureRecoversWithSingleReconnect() throws Exception {
         server = new MbapServer(0);
-        // 事务超时 300ms：黑洞事务经 modbus4j 内部重试（retries=2）后抛超时，
-        // keepAlive 路径触发事务内重连；总耗时约 3×300ms，确定性由内核超时驱动。
+        // 事务超时 150ms：黑洞事务经 modbus4j 内部重试（retries=2）后抛超时，
+        // keepAlive 路径触发事务内重连；总耗时约 3×150ms，确定性由内核超时驱动。
         source = new ModbusSource(
-                new ModbusTcpInfo("127.0.0.1", server.port(), 1, ModbusProtocol.TCP, 300), 1, 2000);
+                new ModbusTcpInfo("127.0.0.1", server.port(), 1, ModbusProtocol.TCP, 150), 1, 2000);
         // 第 1 条连接服务完 2 个请求后静默丢弃后续所有请求（含 modbus4j 的同连接重发）
         server.degradeFirstConnectionAfter(2);
 
@@ -104,7 +104,7 @@ public class TcpMasterLifecycleTest {
     public void initFailureWhenEndpointDownStillRecoversOnFirstUse() throws Exception {
         int freePort = findFreePort();
         source = new ModbusSource(
-                new ModbusTcpInfo("127.0.0.1", freePort, 1, ModbusProtocol.TCP, 300), 1, 2000);
+                new ModbusTcpInfo("127.0.0.1", freePort, 1, ModbusProtocol.TCP, 150), 1, 2000);
         assertFalse("init 时对端不可达：master 未初始化，源不得标记 open", source.isModbusOpen());
 
         server = new MbapServer(freePort); // 对端恢复
