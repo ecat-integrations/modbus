@@ -36,16 +36,12 @@ import static org.junit.Assert.*;
  */
 public class ModbusConfigSchemasTest {
 
-    /** 动态获取的系统可用串口，如果无可用串口则为 null */
-    private String availablePort;
-    
     @Before
     public void setUp() {
 
         // 注入虚拟串口，使 DynamicEnumConfigItem.validate 能在无物理串口的机器上通过
         SerialCommConfigSchema.setTestPortSupplier(
             () -> SerialCommConfigSchema.createTestPorts("ttyUSB0"));
-        availablePort = "ttyUSB0";
     }
 
     // ========== ModbusCommTypeSchema ==========
