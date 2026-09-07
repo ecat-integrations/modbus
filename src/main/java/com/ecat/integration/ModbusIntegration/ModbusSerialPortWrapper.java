@@ -1,8 +1,10 @@
 package com.ecat.integration.ModbusIntegration;
 
 import com.ecat.integration.SerialIntegration.SerialSource;
+import com.fazecast.jSerialComm.SerialPortIOException;
 import com.serotonin.modbus4j.serial.SerialPortWrapper;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
@@ -82,7 +84,9 @@ public class ModbusSerialPortWrapper implements SerialPortWrapper {
     @Override
     public InputStream getInputStream() {
         // event adapter 已在 open() 中暂停，不会竞争数据。
-        return serialSource.getSerialPort().getInputStream();
+        // jSerialComm 断口异常文案不在 modbus4j listener 的退出白名单内，须翻译后才交给
+        // modbus4j，否则对端永久离线时读线程 50ms 循环永续（磁盘刷爆事故根因）。
+        return new JSerialCommExitTranslationInputStream(serialSource.getSerialPort().getInputStream());
     }
 
     @Override
@@ -98,4 +102,81 @@ public class ModbusSerialPortWrapper implements SerialPortWrapper {
     public int getParity() { return parity; }
     @Override
     public int getDataBits() { return dataBits; }
+
+    /**
+     * 把 jSerialComm 断口异常翻译成 modbus4j InputStreamListener 退出白名单文案的输入流。
+     *
+     * <p>modbus4j（固定 v3.1.9，不动第三方）的 InputStreamListener.run() 捕获 IOException 后，
+     * 仅当 getMessage() equals "Stream closed."（原配 serotonin 串口库的文案）或 contains
+     * "nativeavailable" 才置 running=false 退出循环，其余一律按临时错误处理、每 50ms 重试。
+     * 我们用 jSerialComm，断口（对端拔除/关闭）抛 SerialPortIOException("This port appears
+     * to have been shutdown or disconnected.")，不匹配白名单 → 对端永久离线时循环永续，
+     * 形成每口 20 次/秒的异常风暴（40 口并发刷爆磁盘，bug-record-20260907-093000）。
+     * 在流边界把该异常翻译成白名单文案，listener 首颗异常即退出读线程。</p>
+     *
+     * <p>方案取舍：不选 DataConsumer/handler 侧处理——handler 只能旁路观察异常，改不了
+     * listener 内部控制流，50ms 空转与 printStackTrace 风暴仍在；也不改 modbus4j 源码
+     * （第三方固定版本）。本类是唯一翻译点：全部串口设备（master 与 slave）都经
+     * wrapper.getInputStream() 取流，单点覆盖所有串口。</p>
+     */
+    static class JSerialCommExitTranslationInputStream extends InputStream {
+
+        private final InputStream delegate;
+
+        JSerialCommExitTranslationInputStream(InputStream delegate) {
+            this.delegate = delegate;
+        }
+
+        /**
+         * 翻译断口异常。文案必须逐字 equals "Stream closed."（listener 用 StringUtils.equals
+         * 精确匹配白名单）；cause 保留原始异常，排障时不丢真实断口信息。
+         */
+        private static IOException translate(SerialPortIOException e) {
+            IOException translated = new IOException("Stream closed.");
+            translated.initCause(e);
+            return translated;
+        }
+
+        @Override
+        public int available() throws IOException {
+            try {
+                return delegate.available();
+            } catch (SerialPortIOException e) {
+                throw translate(e);
+            }
+        }
+
+        @Override
+        public int read() throws IOException {
+            try {
+                return delegate.read();
+            } catch (SerialPortIOException e) {
+                throw translate(e);
+            }
+        }
+
+        @Override
+        public int read(byte[] b) throws IOException {
+            try {
+                return delegate.read(b);
+            } catch (SerialPortIOException e) {
+                throw translate(e);
+            }
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            try {
+                return delegate.read(b, off, len);
+            } catch (SerialPortIOException e) {
+                throw translate(e);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            // close 纯委托：listener 不在 close 路径上做白名单判断，无需翻译。
+            delegate.close();
+        }
+    }
 }
