@@ -16,6 +16,7 @@ import com.ecat.core.Task.runner.PeriodicChain;
 import com.ecat.core.Task.runner.PeriodicRunner;
 import com.ecat.core.Utils.Log;
 import com.ecat.core.Utils.LogFactory;
+import com.ecat.core.Utils.Mdc.DeviceMdcContext;
 import com.ecat.integration.ModbusIntegration.ModbusSource;
 import com.ecat.integration.ModbusIntegration.ModbusTransactionStrategy;
 
@@ -242,8 +243,14 @@ public final class ModbusPolling {
                 ? ModbusPollingSchedule.fixedRate(periodMs, initialDelayMs, nanoClock, label())
                 : ModbusPollingSchedule.fixedDelay(periodMs, initialDelayMs, nanoClock, label());
         // 首发即发（默认 initialDelay=0；声明 D 则首拍与名义锚点都从 D 起算）；
-        // 在已停机（终端态）的池上起链由 REE 显式上抛（调用方错误，严格模式）
-        PeriodicChain chain = runner.periodic(label(), this::runRound, schedule).start();
+        // 在已停机（终端态）的池上起链由 REE 显式上抛（调用方错误，严格模式）。
+        // 设备归属注入（工单 G）：chain.start 捕获起链线程 MDC 全量快照逐轮恢复——scope 把宿主
+        // 设备三键写入快照，轮体→dispatchIo 逐帧捕获（ModbusSource 事务层 TX/RX 埋点）即携带
+        // 设备归属（共享连接多 slaveId 场景按发起设备逐帧归属），非设备宿主（测试假宿主）no-op
+        PeriodicChain chain;
+        try (DeviceMdcContext.Scope deviceScope = DeviceMdcContext.scopeOf(host)) {
+            chain = runner.periodic(label(), this::runRound, schedule).start();
+        }
         PollingHandle handle = new Handle(chain);
         // SDK 内绑宿主生命周期（18 号 §3.3）：设备移除 sweep 执行本动作即停轮询；
         // cancel 纯标记不中断在飞事务（非阻塞契约），幂等与 sweep 二次调用天然兼容

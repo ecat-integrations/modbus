@@ -3,23 +3,31 @@ package com.ecat.integration.ModbusIntegration.Sdk;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.MDC;
 
+import com.ecat.core.ConfigEntry.ConfigEntry;
+import com.ecat.core.Device.DeviceBase;
 import com.ecat.core.Device.RemovalHost;
+import com.ecat.core.Utils.Mdc.MdcContext;
 import com.ecat.integration.ModbusIntegration.ModbusProtocol;
 import com.ecat.integration.ModbusIntegration.ModbusSource;
 import com.ecat.integration.ModbusIntegration.ModbusTcpInfo;
@@ -89,6 +97,74 @@ public class ModbusPollingChainTest {
         readyPolling(newSource(2000), () -> CompletableFuture.completedFuture(Boolean.TRUE)).start();
         assertEquals("首发即发（默认 initialDelay=0）", 1, timers.shots.size());
         assertEquals("首拍延迟 0", 0L, timers.shots.get(0).delayMillis);
+    }
+
+    // ==================== 设备归属注入（工单 G：通讯追踪设备列） ====================
+
+    /**
+     * 设备宿主起链：chain.start 在 scope 内捕获的 MDC 快照含设备三键——提交面（替身记录的
+     * submitMdc）与轮体恢复面（fire 后 round 内 MDC）双层可见；dispatchIo 逐帧沿用同一快照，
+     * 共享连接多 slaveId 场景按发起设备逐帧归属。起链线程自身不得残留设备键。
+     */
+    @Test
+    public void deviceHostStartInjectsDeviceMdcIntoSubmitSnapshotAndRounds() throws Exception {
+        ConfigEntry entry = new ConfigEntry();
+        entry.setCoordinate("com.ecat:integration-modbus");
+        Map<String, Object> cfg = new HashMap<>();
+        cfg.put("name", "modbus设备-01");
+        DeviceBase deviceHost = new MinimalDevice(entry, cfg);
+
+        AtomicReference<String> seenId = new AtomicReference<>();
+        AtomicReference<String> seenName = new AtomicReference<>();
+        AtomicReference<String> seenCoordinate = new AtomicReference<>();
+        PollingHandle handle = ModbusPolling.on(deviceHost, newSource(2000))
+                .round(src -> {
+                    seenId.set(MDC.get(MdcContext.DEVICE_ID_KEY));
+                    seenName.set(MDC.get(MdcContext.DEVICE_NAME_KEY));
+                    seenCoordinate.set(MDC.get(MdcContext.INTEGRATION_COORDINATE_KEY));
+                    return CompletableFuture.completedFuture(Boolean.TRUE);
+                })
+                .every(5, TimeUnit.SECONDS)
+                .withNanoClock(nanoClock::get)
+                .start();
+
+        assertEquals("首拍提交快照含 device.id（scope 注入被 chain.start 捕获）",
+                deviceHost.getId(), timers.shots.get(0).submitMdc.get(MdcContext.DEVICE_ID_KEY));
+        assertEquals("首拍提交快照含 device.name",
+                "modbus设备-01", timers.shots.get(0).submitMdc.get(MdcContext.DEVICE_NAME_KEY));
+        assertEquals("首拍提交快照含 coordinate",
+                "com.ecat:integration-modbus",
+                timers.shots.get(0).submitMdc.get(MdcContext.INTEGRATION_COORDINATE_KEY));
+
+        timers.fire(0); // 测试线程执行首拍：恢复快照后进 round 体
+        assertEquals("round 体内恢复 device.id", deviceHost.getId(), seenId.get());
+        assertEquals("round 体内恢复 device.name", "modbus设备-01", seenName.get());
+        assertEquals("round 体内恢复 coordinate", "com.ecat:integration-modbus", seenCoordinate.get());
+        assertNull("起链线程（本测试线程）不得残留设备键", MDC.get(MdcContext.DEVICE_ID_KEY));
+        handle.cancel();
+    }
+
+    /** 最小设备桩：仅承载 id/name/coordinate，生命周期全 no-op。 */
+    private static final class MinimalDevice extends DeviceBase {
+        MinimalDevice(ConfigEntry gatewayEntry, Map<String, Object> config) {
+            super(gatewayEntry, "modbus-sdk-test-unique", config);
+        }
+
+        @Override
+        public void init() {
+        }
+
+        @Override
+        public void start() {
+        }
+
+        @Override
+        public void stop() {
+        }
+
+        @Override
+        public void release() {
+        }
     }
 
     @Test
