@@ -99,9 +99,10 @@ ECAT Modbus 集成模块为所有 ecat-integrations 提供完整的 Modbus TCP/R
 ModbusIntegration modbus = (ModbusIntegration) core.getIntegrationRegistry()
         .getIntegration("integration-modbus");
 
+// host 收口——设备/集成类传 this，归属与销毁随宿主生命周期自动绑定
 ModbusSource source = modbus.register(
         new ModbusTcpInfo("192.168.1.100", 502, 1),   // TCP；RTU 用 ModbusSerialInfo
-        "my-device-001");                              // 设备唯一标识
+        this);
 ```
 
 3. **端口分配**：测试与联调环境的设备端口/串口统一走 workspace 端口分配真相源 `.claude/skills/ecat-integration-test-env-prepare/config/port-allocation.json`，勿自选端口（同口冲突会静默丢帧）。
@@ -224,7 +225,7 @@ ModbusTcpInfo tempInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);   // 温度
 ModbusTcpInfo pressureInfo = new ModbusTcpInfo("192.168.1.100", 502, 2); // 压力传感器 slaveId=2
 // 两个 info 的 ip:port 相同 → 底层 TCP 连接复用；slaveId 各自生效（DeviceSpecificModbusSource）
 
-ModbusSource tempSensor = modbus.register(tempInfo, "temp-sensor-001");
+ModbusSource tempSensor = modbus.register(tempInfo, this);
 ModbusTransactionStrategy.executeWithLambda(tempSensor, source ->
     source.readHoldingRegisters(0, 2)
         .thenApply(response -> {
@@ -237,7 +238,7 @@ ModbusTransactionStrategy.executeWithLambda(tempSensor, source ->
             return false;
         }));
 
-ModbusSource pressureSensor = modbus.register(pressureInfo, "pressure-sensor-001");
+ModbusSource pressureSensor = modbus.register(pressureInfo, this);
 ModbusTransactionStrategy.executeWithLambda(pressureSensor, source ->
     source.readHoldingRegisters(10, 2)
         .thenApply(response -> {
@@ -265,7 +266,7 @@ ModbusSerialInfo serialInfo = new ModbusSerialInfo(
     1     // slaveId
 );
 
-ModbusSource lightingControl = modbus.register(serialInfo, "lighting-control-001");
+ModbusSource lightingControl = modbus.register(serialInfo, this);
 ModbusTransactionStrategy.executeWithLambda(lightingControl, source ->
     source.writeCoil(0, true)  // 开启照明
         .thenApply(response -> {
@@ -276,7 +277,7 @@ ModbusTransactionStrategy.executeWithLambda(lightingControl, source ->
             return false;
         }));
 
-ModbusSource hvacControl = modbus.register(serialInfo, "hvac-control-001");
+ModbusSource hvacControl = modbus.register(serialInfo, this);
 ModbusTransactionStrategy.executeWithLambda(hvacControl, source ->
     source.writeRegister(0, 220)  // 设置22.0°C
         .thenApply(response -> {
@@ -347,11 +348,9 @@ ModbusTransactionStrategy.executeWithLambda(modbusSource, source ->
 ### 3. 资源与生命周期管理
 
 ```java
-// 正确的注册方式：每个设备使用唯一 identity
-ModbusSource source = modbus.register(modbusInfo, "unique-device-001");
-
-// 设备移除时解除占用（最后一个占用者释放时底层连接销毁）
-source.removeIntegration("unique-device-001");
+// host 收口注册：归属自动随宿主（设备/集成类 this）记账，
+// 宿主移除时自动摘账——最后一个占用者摘账时底层连接销毁，无需手工 remove
+ModbusSource source = modbus.register(modbusInfo, this);
 ```
 
 集成自身的生命周期（onInit/onStart/onPause/onRelease）由 core 框架管理，消费仓不直接调用。

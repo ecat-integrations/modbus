@@ -1,5 +1,6 @@
 package com.ecat.integration.ModbusIntegration.Attribute;
 
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.State.AttributeBase;
 import com.ecat.core.State.AttributeClass;
 import com.ecat.core.State.AttrState;
@@ -61,7 +62,7 @@ public class ModbusBinaryAttributeTest {
 
         // mock modbusSource 的 acquire() 函数
         when(mockModbusSource.acquire()).thenReturn("testKey");
-        when(mockModbusIntegration.register(any(), any())).thenReturn(mockModbusSource);
+        when(mockModbusIntegration.register(any(), any(ResourceOwner.class))).thenReturn(mockModbusSource);
 
         WriteCoilResponse mockWriteResp = mock(WriteCoilResponse.class);
         when(mockWriteResp.isException()).thenReturn(false);

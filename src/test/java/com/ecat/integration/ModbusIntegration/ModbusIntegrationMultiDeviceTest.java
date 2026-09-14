@@ -1,8 +1,11 @@
 package com.ecat.integration.ModbusIntegration;
 
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.Integration.IntegrationManager;
 import com.ecat.core.Integration.IntegrationRegistry;
+import com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers;
 import com.ecat.integration.SerialIntegration.SerialIntegration;
+import com.ecat.integration.SerialIntegration.SerialInfo;
 import com.ecat.integration.SerialIntegration.SerialSource;
 import org.junit.*;
 import org.mockito.*;
@@ -51,6 +54,12 @@ public class ModbusIntegrationMultiDeviceTest {
     private AutoCloseable mockitoCloseable;
     private org.mockito.MockedStatic<ModbusMasterFactory> factoryMock;
 
+    private static final String COORD = "com.ecat:integration-modbus-multi-test";
+
+    private static ResourceOwner deviceOwner(String deviceId) {
+        return ResourceOwner.device(COORD, "entry-1", deviceId);
+    }
+
     @Before
     public void setUp() throws Exception {
         mockitoCloseable = MockitoAnnotations.openMocks(this);
@@ -64,9 +73,9 @@ public class ModbusIntegrationMultiDeviceTest {
         factoryMock.when(() -> ModbusMasterFactory.createModbusMaster(any(ModbusInfo.class))).thenReturn(mockMaster);
         factoryMock.when(() -> ModbusMasterFactory.createSerialMaster(any(ModbusSerialInfo.class), any(SerialSource.class))).thenReturn(mockMaster);
 
-        // mock serial integration for RTU path
+        // mock serial integration for RTU path（owner 重载承载带主转发）
         when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
-        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+        when(mockSerialIntegration.register(any(SerialInfo.class), any(ResourceOwner.class)))
             .thenReturn(mockSerialSource);
 
         // 设置串口设备信息
@@ -120,7 +129,7 @@ public class ModbusIntegrationMultiDeviceTest {
         // onRelease 已把两池置终端态（R-F：停机后取用 REE）——本 JVM 后续测试类还要
         // 惰性建池，测试基建层面复位（生产无此路径，remove 后必是新 JVM）
         ModbusIoPool.resetForTest();
-        com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers.resetForTest();
+        ModbusSdkTimers.resetForTest();
         if (factoryMock != null) {
             factoryMock.close();
         }
@@ -130,8 +139,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testSerialDevicesShareConnection() {
         // 注册两个共享同一串口的设备
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
-        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, "serial_device_2");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
+        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, deviceOwner("serial_device_2"));
         
         // 验证返回的都是DeviceSpecificModbusSource
         assertTrue(device1 instanceof DeviceSpecificModbusSource);
@@ -153,8 +162,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testTcpDevicesShareConnection() {
         // 注册两个共享同一TCP连接的设备
-        ModbusSource device1 = modbusIntegration.register(mockTcpInfo1, "tcp_device_1");
-        ModbusSource device2 = modbusIntegration.register(mockTcpInfo2, "tcp_device_2");
+        ModbusSource device1 = modbusIntegration.register(mockTcpInfo1, deviceOwner("tcp_device_1"));
+        ModbusSource device2 = modbusIntegration.register(mockTcpInfo2, deviceOwner("tcp_device_2"));
         
         // 验证返回的都是DeviceSpecificModbusSource
         assertTrue(device1 instanceof DeviceSpecificModbusSource);
@@ -182,8 +191,8 @@ public class ModbusIntegrationMultiDeviceTest {
         when(mockSerialInfo3.getProtocol()).thenReturn(ModbusProtocol.SERIAL);
         
         // 注册不同串口的设备
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
-        ModbusSource device3 = modbusIntegration.register(mockSerialInfo3, "serial_device_3");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
+        ModbusSource device3 = modbusIntegration.register(mockSerialInfo3, deviceOwner("serial_device_3"));
         
         DeviceSpecificModbusSource specificDevice1 = (DeviceSpecificModbusSource) device1;
         DeviceSpecificModbusSource specificDevice3 = (DeviceSpecificModbusSource) device3;
@@ -204,8 +213,8 @@ public class ModbusIntegrationMultiDeviceTest {
         when(mockTcpInfo3.getProtocol()).thenReturn(ModbusProtocol.TCP);
         
         // 注册不同TCP连接的设备
-        ModbusSource device1 = modbusIntegration.register(mockTcpInfo1, "tcp_device_1");
-        ModbusSource device3 = modbusIntegration.register(mockTcpInfo3, "tcp_device_3");
+        ModbusSource device1 = modbusIntegration.register(mockTcpInfo1, deviceOwner("tcp_device_1"));
+        ModbusSource device3 = modbusIntegration.register(mockTcpInfo3, deviceOwner("tcp_device_3"));
         
         DeviceSpecificModbusSource specificDevice1 = (DeviceSpecificModbusSource) device1;
         DeviceSpecificModbusSource specificDevice3 = (DeviceSpecificModbusSource) device3;
@@ -219,8 +228,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testSameDeviceReturnsSameInstance() {
         // 注册同一个设备两次
-        ModbusSource device1a = modbusIntegration.register(mockSerialInfo1, "serial_device_1a");
-        ModbusSource device1b = modbusIntegration.register(mockSerialInfo1, "serial_device_1b");
+        ModbusSource device1a = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1a"));
+        ModbusSource device1b = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1b"));
         
         // 验证返回的都是DeviceSpecificModbusSource
         assertTrue(device1a instanceof DeviceSpecificModbusSource);
@@ -242,8 +251,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testLockManagementIsShared() throws Exception {
         // 注册两个共享串口的设备
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
-        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, "serial_device_2");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
+        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, deviceOwner("serial_device_2"));
         
         // 确保初始状态：等待计数为0
         assertEquals(0, device1.getWaitingCount());
@@ -267,8 +276,9 @@ public class ModbusIntegrationMultiDeviceTest {
         // 通知device2开始尝试获取锁
         latch.countDown();
 
-        // 验证等待计数增加
-        Thread.sleep(500); // 等待异步操作
+        // 验证等待计数增加（device2 的锁等待经 IO 旁池异步入队，立即读数是竞态——
+        // deadline 轮询等「已入队」事件发生后再断言；主线程尚未 release，计数稳定为 1）
+        awaitWaitingCount(device2, 1);
         assertEquals(1, device2.getWaitingCount());
         
         // 释放锁
@@ -284,8 +294,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testWaitingCountIsShared() {
         // 注册两个共享串口的设备
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
-        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, "serial_device_2");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
+        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, deviceOwner("serial_device_2"));
         
         // 初始等待计数应该为0
         assertEquals(0, device1.getWaitingCount());
@@ -306,8 +316,8 @@ public class ModbusIntegrationMultiDeviceTest {
     @Test
     public void testIntegrationRegistration() {
         // 注册设备
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
-        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, "serial_device_2");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
+        ModbusSource device2 = modbusIntegration.register(mockSerialInfo2, deviceOwner("serial_device_2"));
         
         // 验证integration被正确注册
         DeviceSpecificModbusSource specificDevice1 = (DeviceSpecificModbusSource) device1;
@@ -335,6 +345,20 @@ public class ModbusIntegrationMultiDeviceTest {
         }
     }
 
+    /**
+     * 等待者入队事件等待（deadline 轮询验证事件已发生，超时即失败）：锁忙等待经 IO
+     * 旁池异步入队，入口返回后立即读数是竞态——先等「已入队」再断言/再 release。
+     */
+    private static void awaitWaitingCount(ModbusSource source, int expected) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (source.getWaitingCount() < expected) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("等待者未在 5s 内入队: expected>=" + expected
+                        + ", actual=" + source.getWaitingCount());
+            }
+        }
+    }
+
     @Test
     public void testUnsupportedProtocolType() {
         // 创建不支持的ModbusInfo类型
@@ -342,7 +366,7 @@ public class ModbusIntegrationMultiDeviceTest {
         
         // 验证抛出异常
         try {
-            modbusIntegration.register(unsupportedInfo, "unsupported_device");
+            modbusIntegration.register(unsupportedInfo, deviceOwner("unsupported_device"));
             fail("Should throw IllegalArgumentException");
         } catch (IllegalArgumentException e) {
             // 预期的异常
@@ -355,14 +379,14 @@ public class ModbusIntegrationMultiDeviceTest {
         String serialIdentity = "COM1";
         when(mockSerialInfo1.getPortName()).thenReturn(serialIdentity);
         
-        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, "serial_device_1");
+        ModbusSource device1 = modbusIntegration.register(mockSerialInfo1, deviceOwner("serial_device_1"));
         assertNotNull(device1);
         
         // 测试TCP连接标识生成
         when(mockTcpInfo1.getIpAddress()).thenReturn("192.168.1.100");
         when(mockTcpInfo1.getPort()).thenReturn(502);
         
-        ModbusSource tcpDevice1 = modbusIntegration.register(mockTcpInfo1, "tcp_device_1");
+        ModbusSource tcpDevice1 = modbusIntegration.register(mockTcpInfo1, deviceOwner("tcp_device_1"));
         assertNotNull(tcpDevice1);
     }
 }

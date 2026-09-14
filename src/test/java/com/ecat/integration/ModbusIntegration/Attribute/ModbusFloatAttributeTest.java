@@ -1,5 +1,6 @@
 package com.ecat.integration.ModbusIntegration.Attribute;
 
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.EcatCore;
 import com.ecat.core.Bus.BusRegistry;
 import com.ecat.core.Bus.event.BusEvent;
@@ -76,7 +77,7 @@ public class ModbusFloatAttributeTest {
 
         // mock modbusSource 的 acquire() 函数
         when(mockModbusSource.acquire()).thenReturn("testKey");
-        when(mockModbusIntegration.register(any(), any())).thenReturn(mockModbusSource);
+        when(mockModbusIntegration.register(any(), any(ResourceOwner.class))).thenReturn(mockModbusSource);
 
         com.serotonin.modbus4j.msg.WriteRegistersResponse mockWriteResp = mock(WriteRegistersResponse.class);
         when(mockWriteResp.isException()).thenReturn(false);

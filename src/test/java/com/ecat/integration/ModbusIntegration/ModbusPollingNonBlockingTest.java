@@ -1,12 +1,11 @@
 package com.ecat.integration.ModbusIntegration;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
@@ -15,20 +14,23 @@ import org.junit.Test;
 import com.ecat.core.Task.LockBusySkippedException;
 
 /**
- * 【E2/R3 终态修复，方案 c】modbus 轮询路径 acquire 非阻塞化（调度三原则「过期即弃」）
- * 的契约测试，与 serial {@code SerialPollingNonBlockingTest} 同型。
+ * 【20260913-073600 修复，方案 c：轮询并入 FIFO 有界等待】modbus 轮询锁契约测试
+ * （与 serial {@code SerialPollingNonBlockingTest} 同型镜像）。
  *
- * <p>红测形态（修复前）：轮询任务体经 {@code executeWithLambda} 取锁，锁忙时
- * {@code ModbusSource.acquire()} 在 waitQueue 上 park 等待——共享连接/RS485 上的秒级
- * 阻塞事务互相排队即饱和震荡（Q-F 终验 WEDGE-RECOVERY ~30/min 不收敛）。
+ * <p>红测形态（修复前）：轮询锁忙立即弃轮（无等待的旧契约）——fixedDelay 相位锁定下
+ * 共享口输家每周期全败，分钟级持续饥饿无公平上界（C2 fixture 实证 23 分钟零帧）。
+ * deed33d（轮询 SDK 化）为保定时线程零 park 把轮询踢出 FIFO 公平队列，是本回归根因。
  *
- * <p>契约：
+ * <p>契约（修复后）：
  * <ul>
- *   <li>①{@code tryAcquire}/{@code executePolling}：锁忙时本周期立即放弃（毫秒级返回，
- *       零 park、不进 waitQueue、不消费 signal），future 以
- *       {@link LockBusySkippedException} 异常完成；</li>
- *   <li>②放弃有记账：{@code getLockBusySkipCount()} 递增（禁静默）；</li>
- *   <li>③写命令路径（{@code executeWithLambda}）不回归：锁忙仍按有限等待 park。</li>
+ *   <li>①入口非阻塞：{@code executePolling} 调用线程毫秒级拿到 future，锁忙时的等待
+ *       移交 IO 旁池线程——定时线程零 park（deed33d 的调度安全边界保留）；</li>
+ *   <li>②抢占 + 有界等待：锁忙时进入既有 FIFO {@code waitQueue} 排队（budget 内等到锁
+ *       → 本轮完成事务），与写命令同队同公平；</li>
+ *   <li>③真弃轮才记账：预算耗尽/队列满/旁池拒绝才以 {@link LockBusySkippedException}
+ *       弃轮并使 {@code getLockBusySkipCount()} 递增——等到锁的轮次不计（观测不说谎）；</li>
+ *   <li>④FIFO 公平：同源多个等待者按入队序先后授予（相位锁定饥饿的根治点）；</li>
+ *   <li>⑤写命令路径（{@code executeWithLambda}）不回归：锁忙仍按有限等待 park。</li>
  * </ul>
  */
 public class ModbusPollingNonBlockingTest {
@@ -39,72 +41,137 @@ public class ModbusPollingNonBlockingTest {
     private static final int WAIT_TIMEOUT_MS = 500;
     /** 写路径 park 下界：证明仍在等锁（≥ 等待超时的一半）。 */
     private static final long WRITE_WAIT_MIN_MS = 300;
+    /** 同源等待容量（与生产默认一致；并发形态测试按容量界分「等到/弃轮」）。 */
+    private static final int MAX_WAITERS = 3;
 
+    /** 跳过 openModbus 的裸源（同包可达 protected 构造；锁/等待队列不依赖 master）。 */
     private ModbusSource newSource() {
-        return new ModbusSource(new ModbusTcpInfo("127.0.0.1", 19999, 1), 1, WAIT_TIMEOUT_MS) {
-            @Override
-            public void closeModbus() {
-                // 测试不建真实 master（与 ModbusGhostLockReapTest 同边界）
-            }
-        };
+        return new ModbusSource(new ModbusSerialInfo("/dev/null", 9600, 8, 1, 0, 500, 1),
+                MAX_WAITERS, WAIT_TIMEOUT_MS, true, false);
     }
 
-    /** 契约①端口级：锁忙时 tryAcquire 立即返回 null，不污染等待队列，且有记账。 */
+    /** 契约①②【红→绿主证】：锁忙不立即弃轮——入队有界等待，预算内等到锁则本轮完成。 */
     @Test
-    public void tryAcquireReturnsNullImmediately_whenLockHeld_andLeavesWaitQueueClean() {
+    public void lockHeldRoundWaitsInQueueAndCompletesAfterRelease() throws Exception {
         ModbusSource source = newSource();
         String held = source.acquire(1, TimeUnit.SECONDS);
         assertNotNull("前置：首次取锁应成功", held);
 
         long start = System.currentTimeMillis();
-        String busy = source.tryAcquire();
+        CompletableFuture<Boolean> future = ModbusTransactionStrategy.executePolling(
+                source, src -> CompletableFuture.completedFuture(true));
         long elapsed = System.currentTimeMillis() - start;
+        assertTrue("入口必须毫秒级返回（耗时 " + elapsed + "ms），等待在旁池不在调用线程",
+                elapsed < NON_BLOCKING_BOUND_MS);
+        assertFalse("锁忙不得立即弃轮（应进入 FIFO 有界等待）", future.isDone());
+        awaitWaitingCount(source, 1);
+        assertEquals("等待者应入等待队列", 1, source.getWaitingCount());
 
-        assertNull("锁忙时 tryAcquire 应立即放弃返回 null", busy);
-        assertTrue("tryAcquire 必须非阻塞（耗时 " + elapsed + "ms）", elapsed < NON_BLOCKING_BOUND_MS);
-        assertEquals("锁忙放弃应计数 1 次", 1L, source.getLockBusySkipCount());
-        assertEquals("tryAcquire 不得入等待队列", 0, source.getWaitingCount());
-
-        // 无 waiter 泄漏：释放后快速路径立即可得
         assertTrue(source.release(held));
+        assertTrue("预算内等到锁：本轮必须完成事务（相位锁定饥饿的根治点）",
+                future.get(5, TimeUnit.SECONDS));
+        assertEquals("等到锁的轮次不得计入锁忙放弃", 0L, source.getLockBusySkipCount());
+
         String next = source.acquire(200, TimeUnit.MILLISECONDS);
-        assertNotNull("tryAcquire 不得污染 waitQueue（释放后应立即取得锁）", next);
+        assertNotNull("事务完成后锁应已释放", next);
         source.release(next);
     }
 
-    /** 契约①策略级【红→绿主证】：锁忙时 executePolling 毫秒级以 LockBusySkippedException 完成。 */
+    /** 契约③：持锁不释放跨过预算 → 才以 LockBusySkippedException 弃轮且有记账。 */
     @Test
-    public void executePollingSkipsImmediatelyWithLockBusySkipped_whenLockHeld() throws Exception {
+    public void budgetExhaustedRoundSkipsWithAccounting() throws Exception {
         ModbusSource source = newSource();
         String held = source.acquire(1, TimeUnit.SECONDS);
         assertNotNull(held);
 
-        long start = System.currentTimeMillis();
         CompletableFuture<Boolean> future = ModbusTransactionStrategy.executePolling(
                 source, src -> CompletableFuture.completedFuture(true));
         try {
-            future.get(NON_BLOCKING_BOUND_MS, TimeUnit.MILLISECONDS);
-            throw new AssertionError("锁忙时 executePolling 应异常完成而非成功");
+            future.get(5, TimeUnit.SECONDS);
+            throw new AssertionError("持锁不释放：预算耗尽应弃轮");
         } catch (ExecutionException e) {
-            assertTrue("异常类型应为 LockBusySkippedException，实际: " + e.getCause(),
+            assertTrue("预算耗尽弃轮应为 LockBusySkippedException，实际: " + e.getCause(),
                     e.getCause() instanceof LockBusySkippedException);
         }
-        long elapsed = System.currentTimeMillis() - start;
-        assertTrue("executePolling 必须毫秒级返回（耗时 " + elapsed + "ms），不得 park 等锁",
-                elapsed < NON_BLOCKING_BOUND_MS);
-        assertEquals(1L, source.getLockBusySkipCount());
-
-        // 锁空闲时 executePolling 正常执行事务并释放
+        assertEquals("真弃轮必须记账（禁静默）", 1L, source.getLockBusySkipCount());
         assertTrue(source.release(held));
-        CompletableFuture<Boolean> ok = ModbusTransactionStrategy.executePolling(
-                source, src -> CompletableFuture.completedFuture(true));
-        assertTrue(ok.get(5, TimeUnit.SECONDS));
-        String again = source.acquire(200, TimeUnit.MILLISECONDS);
-        assertNotNull("事务完成后锁应已释放", again);
-        source.release(again);
     }
 
-    /** 契约③写路径不回归：锁忙时 executeWithLambda 仍按有限等待 park 后异常完成。 */
+    /**
+     * 契约④FIFO 公平：同源两个等待者按入队序先后授予完成。
+     * 完成点在事务体内刻录：release 内联在事务 future 的 whenComplete 链里、先于轮询
+     * 外层 future 完成，跨线程的外层 whenComplete 时戳与授予序存在调度竞态（先授予者的
+     * 回调可能后执行），只有锁内刻录才与授予序构成 happens-before 密闭的因果链。
+     */
+    @Test
+    public void waitersGrantedInFifoOrder() throws Exception {
+        ModbusSource source = newSource();
+        String held = source.acquire(1, TimeUnit.SECONDS);
+        assertNotNull(held);
+
+        long[] doneAt = new long[2];
+        CompletableFuture<Boolean> first = ModbusTransactionStrategy.executePolling(
+                source, src -> {
+                    doneAt[0] = System.nanoTime();
+                    return CompletableFuture.completedFuture(true);
+                });
+        CompletableFuture<Boolean> second = ModbusTransactionStrategy.executePolling(
+                source, src -> {
+                    doneAt[1] = System.nanoTime();
+                    return CompletableFuture.completedFuture(true);
+                });
+        awaitWaitingCount(source, 2);
+        assertEquals("两个等待者都应入队", 2, source.getWaitingCount());
+
+        assertTrue(source.release(held));
+        assertTrue("队头等待者应先授予完成", first.get(5, TimeUnit.SECONDS));
+        assertTrue("次位等待者随后授予完成", second.get(5, TimeUnit.SECONDS));
+        assertTrue("FIFO：先入队者事务体先完成（锁内完成点 doneAt0=" + doneAt[0] + ", doneAt1=" + doneAt[1] + "）",
+                doneAt[0] <= doneAt[1]);
+        assertEquals(0L, source.getLockBusySkipCount());
+    }
+
+    /**
+     * 契约②③并发形态：同源 4 轮询竞争（等待容量 3）——容量内 3 个入队等到锁完成，
+     * 超容量的 1 个立即弃轮记账（有界队列的背压边界）。
+     */
+    @Test
+    public void concurrentPollersSplitIntoWaitersAndCapacitySkip() throws Exception {
+        ModbusSource source = newSource();
+        String held = source.acquire(1, TimeUnit.SECONDS);
+        assertNotNull(held);
+
+        int pollers = MAX_WAITERS + 1;
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Boolean>[] results = new CompletableFuture[pollers];
+        for (int i = 0; i < pollers; i++) {
+            results[i] = ModbusTransactionStrategy.executePolling(
+                    source, src -> CompletableFuture.completedFuture(true));
+        }
+        // 事件已发生才 release：容量内 3 个先入队、超容量 1 个在锁仍被持时被拒（队列满）——
+        // release 抢先会让等待者走快路径直接授予，「3 等到 + 1 弃轮」的分治退化成竞态
+        awaitWaitingCount(source, MAX_WAITERS);
+        awaitLockBusySkipCount(source, 1);
+
+        assertTrue(source.release(held));
+        int completed = 0;
+        int skipped = 0;
+        for (CompletableFuture<Boolean> f : results) {
+            try {
+                assertTrue(f.get(5, TimeUnit.SECONDS));
+                completed++;
+            } catch (ExecutionException e) {
+                assertTrue("容量外弃轮应为 LockBusySkippedException，实际: " + e.getCause(),
+                        e.getCause() instanceof LockBusySkippedException);
+                skipped++;
+            }
+        }
+        assertEquals("容量内等待者应全部等到锁完成", MAX_WAITERS, completed);
+        assertEquals("超容量 1 个立即弃轮", 1, skipped);
+        assertEquals("只有真弃轮计数", 1L, source.getLockBusySkipCount());
+    }
+
+    /** 契约⑤写路径不回归：锁忙时 executeWithLambda 仍按有限等待 park 后异常完成。 */
     @Test
     public void executeWithLambdaKeepsBoundedWait_whenLockHeld() throws Exception {
         ModbusSource source = newSource();
@@ -126,28 +193,28 @@ public class ModbusPollingNonBlockingTest {
         assertTrue(source.release(held));
     }
 
-    /** 契约①并发形态：共享连接上多设备轮询互相不 park——持锁期间 N 个 tryAcquire 全部立即放弃。 */
-    @Test
-    public void concurrentPollersAllSkipImmediately_whenLockHeld() throws Exception {
-        ModbusSource source = newSource();
-        String held = source.acquire(1, TimeUnit.SECONDS);
-        assertNotNull(held);
+    /**
+     * 等待者入队事件等待（deadline 轮询验证事件已发生，超时即失败）：锁忙等待经 IO 旁池
+     * 异步入队，入口返回后立即读数是竞态——先等「已入队」再断言/再 release。
+     */
+    private static void awaitWaitingCount(ModbusSource source, int expected) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (source.getWaitingCount() < expected) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("等待者未在 5s 内入队: expected>=" + expected
+                        + ", actual=" + source.getWaitingCount());
+            }
+        }
+    }
 
-        int pollers = 4;
-        CountDownLatch done = new CountDownLatch(pollers);
-        @SuppressWarnings("unchecked")
-        CompletableFuture<Boolean>[] results = new CompletableFuture[pollers];
-        for (int i = 0; i < pollers; i++) {
-            results[i] = ModbusTransactionStrategy.executePolling(
-                    source, src -> CompletableFuture.completedFuture(true));
-            results[i].whenComplete((r, e) -> done.countDown());
+    /** 真弃轮记账事件等待（同上：旁池任务内 acquire 被拒/预算耗尽后才计数，立即读数是竞态）。 */
+    private static void awaitLockBusySkipCount(ModbusSource source, long expected) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (source.getLockBusySkipCount() < expected) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("弃轮记账未在 5s 内发生: expected>=" + expected
+                        + ", actual=" + source.getLockBusySkipCount());
+            }
         }
-        assertTrue("全部轮询 future 应立即完成（无 park）",
-                done.await(NON_BLOCKING_BOUND_MS, TimeUnit.MILLISECONDS));
-        for (CompletableFuture<Boolean> f : results) {
-            assertTrue(f.isCompletedExceptionally());
-        }
-        assertEquals(pollers, source.getLockBusySkipCount());
-        assertTrue(source.release(held));
     }
 }

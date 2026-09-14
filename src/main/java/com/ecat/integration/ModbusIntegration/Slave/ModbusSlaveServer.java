@@ -63,7 +63,7 @@ import java.util.concurrent.Executors;
 public class ModbusSlaveServer {
     private final Log log = LogFactory.getLogger(getClass());
     private final ModbusSlaveConfig config;
-    private SerialSource serialSource; // RTU 新模式：来自 serial integration（TCP 为 null），stop() 时 closePort() 并置空
+    private SerialSource serialSource; // RTU 新模式：来自 serial integration（TCP 为 null），stop()/releaseSerialPort() 时 closePort() 并置空
     private ModbusSlaveSet slaveSet;
     private ModbusSerialPortWrapper serialPortWrapper; // RTU 新模式：持有 wrapper 引用，stop 时恢复 event adapter
     private final Map<Integer, CallbackProcessImage> processImageMap = new ConcurrentHashMap<>();
@@ -207,6 +207,23 @@ public class ModbusSlaveServer {
 
     public boolean isRunning() {
         return running;
+    }
+
+    /**
+     * 注册中心拆除钩子：无条件释放串口视图（closePort 幂等，二次调用空操作）。
+     * stop() 对 !running 提前返回的语义不动——从未 start/启动失败的 server 无人走过
+     * stop，串口释放由注册中心在摘空拆除时经此兜底（bug-record-20260913-124500 缺陷B：
+     * 释放与「server 生命周期」对齐，不与「running 中的 server 被 stop」绑定）。
+     * 包内可见：调用方 = ModbusSlaveRegistry.unregister（摘空拆除）与 stopAll()（停机
+     * 路径），两处均为无条件释放。synchronized 与
+     * stop()/start() 同监视锁：串口字段的读写与既有生命周期方法互斥、可见性同源。
+     */
+    synchronized void releaseSerialPort() {
+        SerialSource source = serialSource;
+        if (source != null) {
+            source.closePort();
+            serialSource = null;
+        }
     }
 
     public String getConnectionIdentity() {

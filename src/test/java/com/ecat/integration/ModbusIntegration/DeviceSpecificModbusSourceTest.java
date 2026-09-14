@@ -1,5 +1,6 @@
 package com.ecat.integration.ModbusIntegration;
 
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.serotonin.modbus4j.msg.*;
 import org.junit.*;
 import org.mockito.*;
@@ -71,23 +72,26 @@ public class DeviceSpecificModbusSourceTest {
     @Test
     public void testAcquire() {
         String expectedKey = "test_key";
-        when(mockDelegate.acquire()).thenReturn(expectedKey);
-        
+        // 包装器锁获取注入自身 owner（owner 化后调用形态：acquire(ResourceOwner)——
+        // 本测试 String 构造 owner=null，注入 null 即旧无主形态）
+        when(mockDelegate.acquire(nullable(ResourceOwner.class))).thenReturn(expectedKey);
+
         String result = deviceSpecificSource.acquire();
-        
+
         assertEquals(expectedKey, result);
-        verify(mockDelegate).acquire();
+        verify(mockDelegate).acquire((ResourceOwner) null);
     }
 
     @Test
     public void testAcquireWithTimeout() {
         String expectedKey = "test_key_timeout";
-        when(mockDelegate.acquire(anyLong(), any(TimeUnit.class))).thenReturn(expectedKey);
-        
+        when(mockDelegate.acquire(anyLong(), any(TimeUnit.class),
+                nullable(ResourceOwner.class))).thenReturn(expectedKey);
+
         String result = deviceSpecificSource.acquire(5000, TimeUnit.MILLISECONDS);
-        
+
         assertEquals(expectedKey, result);
-        verify(mockDelegate).acquire(5000, TimeUnit.MILLISECONDS);
+        verify(mockDelegate).acquire(5000, TimeUnit.MILLISECONDS, null);
     }
 
     @Test

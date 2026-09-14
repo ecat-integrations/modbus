@@ -24,6 +24,7 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import com.ecat.core.Integration.IntegrationManager;
+import com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers;
 import com.ecat.core.Integration.IntegrationRegistry;
 import com.ecat.core.Utils.TestTools;
 import com.serotonin.modbus4j.ModbusMaster;
@@ -62,8 +63,8 @@ public class ModbusIoPoolConfigTest {
         ModbusIoPool.resetForTest(); // 复位（非 shutdown）：终端态留给本类显式断言，后续类可再惰性建池
         // onRelease 用例经 onReleaseImpl 把 SDK timers 置终端态（不自动复活）——必须复位，
         // 否则 NTFS 字典类序下 terminated 终态泄漏给后续全部消费 timers 真池的测试类
-        // （对齐 ModbusIntegrationTest:99 惯例；bug-record-20260831-151758）
-        com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers.resetForTest();
+        // （对齐 ModbusIntegrationTest tearDown 同款复位惯例；bug-record-20260831-151758）
+        ModbusSdkTimers.resetForTest();
         Mockito.validateMockitoUsage();
     }
 

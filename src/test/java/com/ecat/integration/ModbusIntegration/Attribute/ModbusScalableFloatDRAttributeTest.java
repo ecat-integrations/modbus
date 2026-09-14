@@ -1,5 +1,6 @@
 package com.ecat.integration.ModbusIntegration.Attribute;
 
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.State.AttributeBase;
 import com.ecat.core.State.AttributeClass;
 import com.ecat.core.State.AttrState;
@@ -91,7 +92,7 @@ public class ModbusScalableFloatDRAttributeTest {
 
         // 深度依赖 mock
         when(mockModbusSource.acquire()).thenReturn("testKey");
-        when(mockModbusIntegration.register(any(), any())).thenReturn(mockModbusSource);
+        when(mockModbusIntegration.register(any(), any(ResourceOwner.class))).thenReturn(mockModbusSource);
 
         WriteRegistersResponse mockWriteResp = mock(WriteRegistersResponse.class);
         when(mockWriteResp.isException()).thenReturn(false);

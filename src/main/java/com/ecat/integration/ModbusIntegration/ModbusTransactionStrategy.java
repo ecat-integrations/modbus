@@ -87,43 +87,59 @@ public class ModbusTransactionStrategy {
         }
     }
 
+    /** 两参 {@link #executePolling} 的默认锁等待预算（毫秒）：直调入口的消费方无周期
+     * 上下文，取 SDK clamp 上界（同 {@code ModbusPolling#lockWaitBudgetMs()} 上限）。 */
+    private static final long DEFAULT_LOCK_BUDGET_MS = 500L;
+
     /**
-     * 轮询事务入口（E2/R3 终态修复，方案 c：acquire 非阻塞化——调度三原则「过期即弃」，
-     * 与 serial {@code SerialTransactionStrategy.executePolling} 同型）。
+     * 轮询事务入口（默认预算形态）：直调本入口的消费方（无 SDK 周期上下文）按
+     * {@link #DEFAULT_LOCK_BUDGET_MS} 有界等待。语义同
+     * {@link #executePolling(ModbusSource, long, Function)}。
+     */
+    public static CompletableFuture<Boolean> executePolling(ModbusSource source, Function<ModbusSource, CompletableFuture<Boolean>> lambda) {
+        return executePolling(source, DEFAULT_LOCK_BUDGET_MS, lambda);
+    }
+
+    /**
+     * 轮询事务入口（20260913-073600 修复，方案 c：轮询并入 FIFO 有界等待）：经
+     * {@link ModbusSource#acquirePollingBounded(long)} 取锁——无竞争快路径直达；锁忙时
+     * 等待在 IO 旁池线程上排队（预算内等到锁 → 本轮完成事务），调用线程（SDK 定时线程）
+     * 零 park。轮询与写命令同队同公平，deed33d 引入的共享口相位锁定饥饿（输家分钟级
+     * 零帧，C2 实证）根治。
      *
-     * <p>与 {@link #executeWithLambda(ModbusSource, Function)} 的唯一差异在锁忙分支：经
-     * {@link ModbusSource#tryAcquire()} 非阻塞取锁——锁忙时<b>本周期立即放弃</b>（不 park
-     * 等锁、不占等待队列、不消费 signal），返回以
-     * {@link LockBusySkippedException} 异常完成的
-     * future。周期任务的 whenComplete 消费方应把该异常识别为「本轮跳过」而非设备错误。
-     * 放弃在源侧有记账（{@link ModbusSource#getLockBusySkipCount()} + 限频 warn）。
+     * <p>弃轮形态：预算耗尽/等待队列满/旁池饱和均为真不可得，future 以
+     * {@link LockBusySkippedException} 异常完成——周期任务的 whenComplete 消费方应把该
+     * 异常识别为「本轮跳过」而非设备错误；真弃轮在源侧有记账
+     * （{@link ModbusSource#getLockBusySkipCount()}，等到锁的轮次不计）。
      *
      * <p><b>完成语义</b>：fire-and-forget（事务 CF 由调用方 whenComplete 消费，阻塞 send
-     * 已由 IO 旁池承接，见 ModbusSource.dispatchIo）。曾按 R3 期 4 计划把事务 CF 挂引擎
-     * 周期任务（引擎静态 attach 钩子），R4 全异步统一模型（用户终批）废止 attach 机制后
-     * 已回退且钩子已在 R4 批 0 删除——轮询完成绑定由调用方经
-     * {@code scheduleWithFixedDelay(Supplier, ...)} 重载（事务 CF 返回值流出）接入，
-     * 本方法保持 fire-and-forget 现状。
+     * 已由 IO 旁池承接，见 ModbusSource.dispatchIo）。快路径取锁时事务体在调用线程执行，
+     * 等待授予时在旁池线程执行（MDC 已恢复，帧捕获携带设备归属）——两形态事务体都必须
+     * 非阻塞（IO 经 dispatchIo），线程面差异无语义影响。
      *
-     * <p><b>边界</b>：只供周期轮询任务体使用；属性写（setValueImpl 钩子的 IO 事务体，22 号 setValue final 化后）与需要有限
-     * 等待语义的调用方继续走 {@code executeWithLambda}（闸内 IO 体对锁的等待保留）。
+     * <p><b>边界</b>：只供周期轮询任务体使用；属性写与需要有限等待语义的调用方继续走
+     * {@code executeWithLambda}（闸内 IO 体对锁的等待保留）。
      *
      * <p>取锁成功后的事务体/硬超时/release/传输强拆链路与 {@code executeWithLambda} 完全
      * 共享（{@link #executeHeld}），F-16 的收割/恢复机制不受影响。
      *
-     * @param source modbus 源
-     * @param lambda 在持锁期间执行的事务
-     * @return 事务结果 future；锁忙时为 LockBusySkippedException 异常 future（立即完成）
+     * @param source       modbus 源
+     * @param lockBudgetMs 锁等待预算（毫秒，须 &gt; 0；SDK 侧按轮询周期 clamp）
+     * @param lambda       在持锁期间执行的事务
+     * @return 事务结果 future；锁不可得时为 LockBusySkippedException 异常 future
      */
-    public static CompletableFuture<Boolean> executePolling(ModbusSource source, Function<ModbusSource, CompletableFuture<Boolean>> lambda) {
-        String key = source.tryAcquire();
-        if (key == null) {
-            CompletableFuture<Boolean> skipped = new CompletableFuture<>();
-            skipped.completeExceptionally(new LockBusySkippedException(
-                    "Polling transaction skipped: source lock busy, will retry next cycle"));
-            return skipped;
-        }
-        return executeHeld(source, key, lambda);
+    public static CompletableFuture<Boolean> executePolling(ModbusSource source, long lockBudgetMs,
+            Function<ModbusSource, CompletableFuture<Boolean>> lambda) {
+        return source.acquirePollingBounded(lockBudgetMs).thenCompose(key -> {
+            if (key == null) {
+                CompletableFuture<Boolean> skipped = new CompletableFuture<>();
+                skipped.completeExceptionally(new LockBusySkippedException(
+                        "Polling transaction skipped: lock unavailable within budget " + lockBudgetMs
+                                + "ms, will retry next cycle"));
+                return skipped;
+            }
+            return executeHeld(source, key, lambda);
+        });
     }
 
     /**
@@ -134,7 +150,7 @@ public class ModbusTransactionStrategy {
      * <p><b>F-40 apply 阶段看门狗</b>：写系列事务体（writeXxxWithSlaveId）在调用线程直发
      * {@code master.send}（M8 单飞队列自锁修复的合法形态），TCP 传输半开时 send 永不返回，
      * 本方法阻塞在 {@code lambda.apply} 内部——既有事务硬超时在 apply 返回后才武装，对该
-     * 挂死形态完全不覆盖（ASM G11-5：控制写挂死 → 源锁钉死 → 轮询 tryAcquire 全放弃 →
+     * 挂死形态完全不覆盖（ASM G11-5：控制写挂死 → 源锁钉死 → 轮询锁获取全弃轮 →
      * 拥塞窗 acquire 超时雪崩）。看门狗在 apply 前武装、apply 返回即撤销，超时未返回则
      * 释放锁 + 强拆传输（socket 关闭使阻塞 send 异常返回）+ future 异常完成，与既有
      * 硬超时路径同一恢复动作（release 先于强拆，防 recovery 阻塞推迟锁释放）。

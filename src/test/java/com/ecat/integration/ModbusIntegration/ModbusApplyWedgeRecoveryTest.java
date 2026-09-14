@@ -18,7 +18,7 @@ import org.junit.Test;
  * <p>场景：写系列（writeXxxWithSlaveId）事务体在调用线程直发 master.send（M8 单飞队列
  * 自锁修复的合法形态）。TCP 传输半开时 send 永不返回 → executeHeld 阻塞在
  * lambda.apply 内部 → 既有事务硬超时（apply 返回后才武装）永不生效 → release /
- * forceRecoverTransport 均不执行 → 源锁被钉死、后续轮询 tryAcquire 全放弃、拥塞窗内
+ * forceRecoverTransport 均不执行 → 源锁被钉死、后续轮询锁获取全弃轮、拥塞窗内
  * acquire 超时雪崩（ASM G11-5 根因）。
  *
  * <p>契约：apply 阶段挂死超过 boundedReadWaitMs 必须有界恢复——传输强拆被调

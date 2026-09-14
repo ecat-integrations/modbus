@@ -4,6 +4,8 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.ecat.core.CommTrace.OwnerLevel;
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.Utils.TestTools;
 import com.serotonin.modbus4j.ModbusMaster;
 import com.serotonin.modbus4j.exception.ModbusTransportException;
@@ -11,6 +13,7 @@ import com.serotonin.modbus4j.msg.*;
 import org.junit.*;
 import org.mockito.*;
 import org.slf4j.LoggerFactory;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
@@ -85,27 +88,30 @@ public class ModbusSourceTest {
     }
 
     /**
-     * 测试集成注册与移除
+     * 测试集成注册与移除。
+     * 账本 owner 化（io-resource-owner §5.3）：原 registeredIntegrations List 字段升为
+     * ownerKey→owner 账本，字符串身份包 LEGACY owner 入账——经只读读面断言。
      */
     @Test
-    public void testRegisterAndRemoveIntegration() throws Exception {
+    public void testRegisterAndRemoveIntegration() {
         String identity = "testDevice";
         modbusSource.registerIntegration(identity);
-        Object registered = TestTools.getPrivateField(modbusSource, "registeredIntegrations");
-        assertTrue(((java.util.List<?>) registered).contains(identity));
+        List<ResourceOwner> owners = modbusSource.getRegisteredOwners();
+        assertEquals(1, owners.size());
+        assertEquals(OwnerLevel.LEGACY, owners.get(0).getLevel());
+        assertEquals(identity, owners.get(0).getRawIdentity());
         modbusSource.removeIntegration(identity);
-        assertFalse(((java.util.List<?>) registered).contains(identity));
+        assertTrue(modbusSource.getRegisteredOwners().isEmpty());
     }
 
     /**
-     * 测试通过 identity 释放资源
+     * 测试通过 identity 释放资源（LEGACY 包装路径，语义同旧：末源注销销毁 master）
      */
     @Test
-    public void testCloseModbusByIdentity() throws Exception {
+    public void testCloseModbusByIdentity() {
         String identity = "testDevice";
         modbusSource.registerIntegration(identity);
-        Object registered = TestTools.getPrivateField(modbusSource, "registeredIntegrations");
-        assertTrue(((java.util.List<?>) registered).contains(identity));
+        assertEquals(1, modbusSource.getRegisteredOwners().size());
         when(modbusMaster.isInitialized()).thenReturn(true);
         modbusSource.closeModbus(identity);
         verify(modbusMaster, times(1)).destroy();

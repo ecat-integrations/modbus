@@ -25,7 +25,8 @@ import com.ecat.core.Task.runner.ShotScheduler;
  *
  * <p><b>池尺寸=2 论证</b>（线程预算可观测面，改尺寸须同步改论证与守护测试）：定时线程
  * 只执行「发起段」——{@code fireRound} 体是 µs 级提交：
- * {@code executePolling} 的 tryAcquire（非阻塞）+ 轮体（读请求 {@code supplyAsync}
+ * {@code executePolling} 的锁获取（快路径直达；锁忙时的有界等待移交 IO 旁池线程，
+ * 本池零 park）+ 轮体（读请求 {@code supplyAsync}
  * 提交，O(1)）+ 内建硬超时/超时执法的单发登记与到点体（complete future，µs 级）；
  * 真实阻塞 IO（master.send 等回音）与恢复动作（destroy/init）全部
  * 在 {@link com.ecat.integration.ModbusIntegration.ModbusIoPool}（16 条）上，本池零

@@ -1,17 +1,22 @@
 package com.ecat.integration.ModbusIntegration;
 
+import com.ecat.core.CommTrace.ResourceOwner;
+import com.ecat.core.CommTrace.Usage;
+import com.ecat.core.ConfigEntry.ConfigEntry;
+import com.ecat.core.Device.DeviceBase;
 import com.ecat.core.Integration.IntegrationManager;
 import com.ecat.core.Integration.IntegrationRegistry;
 import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.TestTools;
+import com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers;
 import com.ecat.integration.SerialIntegration.SerialIntegration;
+import com.ecat.integration.SerialIntegration.SerialInfo;
 import com.ecat.integration.SerialIntegration.SerialSource;
 import org.junit.*;
 import org.mockito.*;
 import com.serotonin.modbus4j.ModbusFactory;
 import com.serotonin.modbus4j.ModbusMaster;
 import com.serotonin.modbus4j.ip.IpParameters;
-import java.lang.reflect.Method;
 import java.util.*;
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -48,6 +53,43 @@ public class ModbusIntegrationTest {
     private AutoCloseable mockitoCloseable;
     private org.mockito.MockedStatic<ModbusMasterFactory> factoryMock;
     private MockedConstruction<ModbusFactory> modbusFactoryConstruction;
+
+    private static final String COORD = "com.ecat:integration-modbus-test";
+
+    private static ResourceOwner deviceOwner(String deviceId) {
+        return ResourceOwner.device(COORD, "entry-1", deviceId);
+    }
+
+    /** 入口最小设备桩（宿主派生路径）：entry 带 entryId+coordinate，of(host) 可派生 DEVICE 层。 */
+    private static final class HostDevice extends DeviceBase {
+        HostDevice(String entryId) {
+            super(entryWith(entryId));
+        }
+
+        private static ConfigEntry entryWith(String entryId) {
+            ConfigEntry entry = new ConfigEntry();
+            entry.setEntryId(entryId);
+            entry.setCoordinate(COORD);
+            entry.setData(new HashMap<>());
+            return entry;
+        }
+
+        @Override
+        public void init() {
+        }
+
+        @Override
+        public void start() {
+        }
+
+        @Override
+        public void stop() {
+        }
+
+        @Override
+        public void release() {
+        }
+    }
 
     @Before
     public void setUp() {
@@ -96,7 +138,7 @@ public class ModbusIntegrationTest {
         // onRelease 已把两池置终端态（R-F：停机后取用 REE）——本 JVM 后续测试类还要
         // 惰性建池，测试基建层面复位（生产无此路径，remove 后必是新 JVM）
         ModbusIoPool.resetForTest();
-        com.ecat.integration.ModbusIntegration.Sdk.ModbusSdkTimers.resetForTest();
+        ModbusSdkTimers.resetForTest();
         if (factoryMock != null) {
             factoryMock.close();
         }
@@ -104,26 +146,6 @@ public class ModbusIntegrationTest {
             modbusFactoryConstruction.close();
         }
         mockitoCloseable.close();
-    }
-
-    public Object invokePrivateMethod(Object target, String methodName, Object... args) throws Exception {
-        Class<?>[] parameterTypes = new Class[args.length];
-        for (int i = 0; i < args.length; i++) {
-            if (args[i] instanceof Short) {
-                parameterTypes[i] = short.class;
-            } else if (args[i] instanceof Integer) {
-                parameterTypes[i] = int.class;
-            } else if (args[i] instanceof ModbusInfo) {
-                parameterTypes[i] = ModbusInfo.class;
-            } else if (args[i] instanceof String) {
-                parameterTypes[i] = String.class;
-            } else {
-                parameterTypes[i] = args[i].getClass();
-            }
-        }
-        Method method = TestTools.findMethod(target.getClass(), methodName, parameterTypes);
-        method.setAccessible(true);
-        return method.invoke(target, args);
     }
 
     @Test
@@ -156,13 +178,13 @@ public class ModbusIntegrationTest {
         when(info.getIpAddress()).thenReturn("localhost");
         when(info.getPort()).thenReturn(502);
         when(info.getProtocol()).thenReturn(ModbusProtocol.TCP);
-        String identity = "tcp1";
 
         modbusIntegration.onInit();
 
-        // 使用 TestTools 调用私有方法 createOrGetSource
+        // 经 host 收口注册入口（内部即 createOrGetSource；私有签名已随 owner 化改形，
+        // 反射直达不可维护）
         try {
-            ModbusSource result = (ModbusSource) invokePrivateMethod(modbusIntegration, "createOrGetSource", info, identity);
+            ModbusSource result = modbusIntegration.register(info, new HostDevice("entry-1"));
             assertNotNull(result);
             assertTrue(result instanceof DeviceSpecificModbusSource);
         } catch (Exception e) {
@@ -201,8 +223,8 @@ public class ModbusIntegrationTest {
         Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "tcpSources");
         tcpSources.put("127.0.0.1:1699", deadSource);
 
-        // 新设备申请同一连接
-        ModbusSource result = (ModbusSource) invokePrivateMethod(modbusIntegration, "createOrGetSource", info, "new-dev-1");
+        // 新设备申请同一连接（经 owner 重载注册入口，内部即 createOrGetSource）
+        ModbusSource result = modbusIntegration.register(info, deviceOwner("new-dev-1"));
         assertNotNull(result);
 
         // --- 断言：脏数据清除 + 新源可用 ---
@@ -219,20 +241,19 @@ public class ModbusIntegrationTest {
 
     @Test
     public void testRegister_andGetSource_Serial() {
-        // Set up mock serial integration
+        // Set up mock serial integration（RTU 带主转发：owner 重载承载）
         when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
-        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+        when(mockSerialIntegration.register(any(SerialInfo.class), any(ResourceOwner.class)))
             .thenReturn(mockSerialSource);
 
         ModbusSerialInfo info = mock(ModbusSerialInfo.class);
         when(info.getPortName()).thenReturn("COM1");
         when(info.getProtocol()).thenReturn(ModbusProtocol.SERIAL);
-        String identity = "serial1";
 
         modbusIntegration.onInit();
 
-        // 直接调用公共方法 register
-        ModbusSource result = modbusIntegration.register(info, identity);
+        // 直接调用公共方法 register（host 收口入口）
+        ModbusSource result = modbusIntegration.register(info, new HostDevice("entry-1"));
         assertNotNull(result);
         assertTrue(result instanceof DeviceSpecificModbusSource);
     }
@@ -274,7 +295,7 @@ public class ModbusIntegrationTest {
 
         // Should throw — RTU requires serial integration (no more fallback)
         try {
-            modbusIntegration.register(info, "serial-fallback-1");
+            modbusIntegration.register(info, deviceOwner("serial-fallback-1"));
             fail("Should throw IllegalStateException when serial integration is null");
         } catch (IllegalStateException e) {
             // expected
@@ -285,7 +306,7 @@ public class ModbusIntegrationTest {
     public void testRegister_serial_withSerialIntegration() throws Exception {
         // Set up mock serial integration via integrationRegistry
         when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
-        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+        when(mockSerialIntegration.register(any(SerialInfo.class), any(ResourceOwner.class)))
             .thenReturn(mockSerialSource);
         when(mockSerialSource.getTimeout()).thenReturn(1000);
 
@@ -293,23 +314,24 @@ public class ModbusIntegrationTest {
 
         ModbusSerialInfo info = new ModbusSerialInfo("COM1", 9600, 8, 1, 0, 1000, 1);
 
-        ModbusSource result = modbusIntegration.register(info, "serial-new-1");
+        ModbusSource result = modbusIntegration.register(info, deviceOwner("serial-new-1"));
 
         assertNotNull("register should return non-null", result);
         assertTrue(result instanceof DeviceSpecificModbusSource);
         DeviceSpecificModbusSource deviceSource = (DeviceSpecificModbusSource) result;
         assertEquals(Integer.valueOf(1), deviceSource.getDeviceSlaveId());
-        // Verify serial integration was called with correct identity prefix
-        verify(mockSerialIntegration).register(
-            any(com.ecat.integration.SerialIntegration.SerialInfo.class),
-            eq("modbus-COM1"));
+        // RTU 串口注册经 ADAPTER 带主转发（§4）：转发调用方 owner 的 adapter 视图
+        ArgumentCaptor<ResourceOwner> ownerCaptor = ArgumentCaptor.forClass(ResourceOwner.class);
+        verify(mockSerialIntegration).register(any(SerialInfo.class), ownerCaptor.capture());
+        assertEquals(Usage.ADAPTER, ownerCaptor.getValue().getUsage());
+        assertEquals("转发调用方 owner（穿透保留设备身份）", "serial-new-1", ownerCaptor.getValue().getDeviceId());
     }
 
     @Test
     public void testRegister_serial_convertSerialInfo() throws Exception {
         // Set up mock serial integration via integrationRegistry
         when(integrationRegistry.getIntegration("integration-serial")).thenReturn(mockSerialIntegration);
-        when(mockSerialIntegration.register(any(com.ecat.integration.SerialIntegration.SerialInfo.class), anyString()))
+        when(mockSerialIntegration.register(any(SerialInfo.class), any(ResourceOwner.class)))
             .thenReturn(mockSerialSource);
         when(mockSerialSource.getTimeout()).thenReturn(500);
 
@@ -317,18 +339,19 @@ public class ModbusIntegrationTest {
 
         ModbusSerialInfo info = new ModbusSerialInfo("/dev/ttyUSB0", 19200, 8, 2, 2, 500, 5);
 
-        modbusIntegration.register(info, "device-5");
+        modbusIntegration.register(info, deviceOwner("device-5"));
 
         // Verify the conversion happened correctly
-        ArgumentCaptor<com.ecat.integration.SerialIntegration.SerialInfo> captor =
-            ArgumentCaptor.forClass(com.ecat.integration.SerialIntegration.SerialInfo.class);
-        verify(mockSerialIntegration).register(captor.capture(), eq("modbus-/dev/ttyUSB0"));
+        ArgumentCaptor<SerialInfo> captor = ArgumentCaptor.forClass(SerialInfo.class);
+        ArgumentCaptor<ResourceOwner> ownerCaptor = ArgumentCaptor.forClass(ResourceOwner.class);
+        verify(mockSerialIntegration).register(captor.capture(), ownerCaptor.capture());
 
-        com.ecat.integration.SerialIntegration.SerialInfo captured = captor.getValue();
+        SerialInfo captured = captor.getValue();
         assertNotNull(captured);
         // Verify port name and baudrate were transferred correctly
         assertTrue(captured.toString().contains("/dev/ttyUSB0"));
         assertTrue(captured.toString().contains("19200"));
+        assertEquals(Usage.ADAPTER, ownerCaptor.getValue().getUsage());
     }
 
     @Test
@@ -337,7 +360,7 @@ public class ModbusIntegrationTest {
 
         ModbusTcpInfo info = new ModbusTcpInfo("192.168.1.100", 502, 1);
 
-        ModbusSource result = modbusIntegration.register(info, "tcp-device1");
+        ModbusSource result = modbusIntegration.register(info, deviceOwner("tcp-device1"));
 
         assertNotNull("register should return non-null", result);
         assertTrue(result instanceof DeviceSpecificModbusSource);
@@ -352,8 +375,8 @@ public class ModbusIntegrationTest {
         ModbusTcpInfo info1 = new ModbusTcpInfo("192.168.1.100", 502, 1);
         ModbusTcpInfo info2 = new ModbusTcpInfo("192.168.1.100", 502, 2);
 
-        ModbusSource source1 = modbusIntegration.register(info1, "device1");
-        ModbusSource source2 = modbusIntegration.register(info2, "device2");
+        ModbusSource source1 = modbusIntegration.register(info1, deviceOwner("device1"));
+        ModbusSource source2 = modbusIntegration.register(info2, deviceOwner("device2"));
 
         // Both sources should share the same underlying delegate (same getModbusInfo)
         assertNotNull(source1.getModbusInfo());
@@ -367,8 +390,8 @@ public class ModbusIntegrationTest {
         ModbusTcpInfo info1 = new ModbusTcpInfo("192.168.1.100", 502, 1);
         ModbusTcpInfo info2 = new ModbusTcpInfo("192.168.1.200", 502, 1);
 
-        ModbusSource source1 = modbusIntegration.register(info1, "device1");
-        ModbusSource source2 = modbusIntegration.register(info2, "device2");
+        ModbusSource source1 = modbusIntegration.register(info1, deviceOwner("device1"));
+        ModbusSource source2 = modbusIntegration.register(info2, deviceOwner("device2"));
 
         // Sources should have different underlying delegates
         assertNotSame("Sources should have different underlying ModbusSources", source1.getModbusInfo(), source2.getModbusInfo());
@@ -381,7 +404,7 @@ public class ModbusIntegrationTest {
 
         // Register a TCP source to populate tcpSources map
         ModbusTcpInfo info = new ModbusTcpInfo("192.168.1.100", 502, 1);
-        modbusIntegration.register(info, "device1");
+        modbusIntegration.register(info, deviceOwner("device1"));
 
         Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "tcpSources");
         Map<String, ModbusSource> serialSources = (Map<String, ModbusSource>) TestTools.getPrivateField(modbusIntegration, "serialSources");
@@ -428,13 +451,13 @@ public class ModbusIntegrationTest {
 
         // Register first device with TCP (MBAP) protocol
         ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
-        ModbusSource source1 = modbusIntegration.register(tcpInfo, "tcp-device1");
+        ModbusSource source1 = modbusIntegration.register(tcpInfo, deviceOwner("tcp-device1"));
         assertNotNull(source1);
 
         // Try to register second device with RTU_OVER_TCP on same ip:port
         ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
         try {
-            modbusIntegration.register(rtuInfo, "rtu-device1");
+            modbusIntegration.register(rtuInfo, deviceOwner("rtu-device1"));
             fail("Should throw IllegalStateException for protocol conflict");
         } catch (IllegalStateException e) {
             assertTrue("Exception message should mention protocol conflict",
@@ -454,13 +477,13 @@ public class ModbusIntegrationTest {
 
         // Register first device with RTU_OVER_TCP protocol
         ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
-        ModbusSource source1 = modbusIntegration.register(rtuInfo, "rtu-device1");
+        ModbusSource source1 = modbusIntegration.register(rtuInfo, deviceOwner("rtu-device1"));
         assertNotNull(source1);
 
         // Try to register second device with TCP on same ip:port
         ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
         try {
-            modbusIntegration.register(tcpInfo, "tcp-device1");
+            modbusIntegration.register(tcpInfo, deviceOwner("tcp-device1"));
             fail("Should throw IllegalStateException for protocol conflict");
         } catch (IllegalStateException e) {
             assertTrue("Exception message should mention protocol conflict",
@@ -480,8 +503,8 @@ public class ModbusIntegrationTest {
         ModbusTcpInfo rtuInfo1 = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
         ModbusTcpInfo rtuInfo2 = new ModbusTcpInfo("192.168.1.100", 502, 2, ModbusProtocol.RTU_OVER_TCP);
 
-        ModbusSource source1 = modbusIntegration.register(rtuInfo1, "rtu-device1");
-        ModbusSource source2 = modbusIntegration.register(rtuInfo2, "rtu-device2");
+        ModbusSource source1 = modbusIntegration.register(rtuInfo1, deviceOwner("rtu-device1"));
+        ModbusSource source2 = modbusIntegration.register(rtuInfo2, deviceOwner("rtu-device2"));
 
         assertNotNull(source1);
         assertNotNull(source2);
@@ -498,7 +521,7 @@ public class ModbusIntegrationTest {
 
         // Register TCP device
         ModbusTcpInfo tcpInfo = new ModbusTcpInfo("192.168.1.100", 502, 1);
-        modbusIntegration.register(tcpInfo, "tcp-device1");
+        modbusIntegration.register(tcpInfo, deviceOwner("tcp-device1"));
 
         // Get the shared source and simulate it being destroyed (isModbusOpen=false)
         Map<String, ModbusSource> tcpSources = (Map<String, ModbusSource>)
@@ -514,7 +537,7 @@ public class ModbusIntegrationTest {
 
         // Now register RTU_OVER_TCP - should succeed because destroyed source gets cleaned up
         ModbusTcpInfo rtuInfo = new ModbusTcpInfo("192.168.1.100", 502, 1, ModbusProtocol.RTU_OVER_TCP);
-        ModbusSource source2 = modbusIntegration.register(rtuInfo, "rtu-device1");
+        ModbusSource source2 = modbusIntegration.register(rtuInfo, deviceOwner("rtu-device1"));
 
         assertNotNull("Should successfully register after source destroyed", source2);
         // The new source should have RTU_OVER_TCP protocol

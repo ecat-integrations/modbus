@@ -49,8 +49,10 @@ import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -60,8 +62,11 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import com.ecat.core.CommTrace.CommTraceBuffer;
 import com.ecat.core.CommTrace.CommTraceTransport;
+import com.ecat.core.CommTrace.OwnerLevel;
+import com.ecat.core.CommTrace.ResourceOwner;
 import com.ecat.core.Utils.Log;
 import com.ecat.core.Utils.LogFactory;
+import com.ecat.integration.SerialIntegration.SerialSource;
 import org.slf4j.MDC;
 
 public class ModbusSource {
@@ -75,6 +80,11 @@ public class ModbusSource {
     private String currentKey;    // 当前持有锁的key
     private volatile long lockAcquireTime;   // 持锁时刻（幽灵锁收割判据）
     private volatile String lockAcquireThread; // 持锁线程名（幽灵锁收割日志定位）
+    // 当前持锁事务的注册 owner（io-resource-owner §5.3 锁）：授予点登记、release 与幽灵锁
+    // 收割按同一状态机清除；sendTraced 捕获点以此作 TX/RX 权威归因（owner 在=整组投影，
+    // 不与线程 MDC 混搭）。null=无锁路径或 LEGACY 注册——此时捕获点按 frameAttributionOwner()
+    // 落源注册兜底（坐标级投影），无类型化注册者才维持 MDC 归因现状。
+    private volatile ResourceOwner lockAcquireOwner;
     private final Queue<String> waitQueue = new LinkedList<>(); // 等待队列（保存请求标识）
 
     /**
@@ -100,7 +110,13 @@ public class ModbusSource {
     private ModbusMaster modbusMaster;
     @Getter
     private ModbusInfo modbusInfo;
-    private List<String> registeredIntegrations;
+    // 注册方账本（io-resource-owner §5.3）：ownerKey → ResourceOwner。账本被注册方线程
+    // （register/registerForDevice）与摘账线程（closeModbus/宿主 onRemove 收尾）并发读写，
+    // ConcurrentHashMap 弱一致迭代保证 getRegisteredOwners 读面不抛 CME 不漏读（对齐 serial
+    // W4 账本形态）；消费方（findSourceByOwner/折叠查询/测试）均按 ownerKey 精确匹配，无
+    // 插入序依赖，无需保序结构。同键重注册天然去重（一名一票）；LEGACY 字符串身份以
+    // legacy 包装入账，与类型化 owner 同账本混存（迁移过渡期常态）。
+    private final Map<String, ResourceOwner> registeredOwners = new ConcurrentHashMap<>();
     // modbus IO 旁池（R3 期 4，15 号 §6.4）：阻塞 send（含写+等回音）的专职有界池
     // ecat-modbus-io-N，与调度引擎车道彻底分离——发起段（本源读/写方法调用方，含引擎 lane
     // worker 上的轮询任务体/写闸）提交即返，响应窗的阻塞消耗由旁池线程承接，引擎 worker
@@ -139,7 +155,6 @@ public class ModbusSource {
         this.maxWaiters = maxWaiters; // 设置资源最大等待请求数
         this.waitTimeoutMs = waitTimeoutMs; // 设置资源等待超时时间
         this.modbusInfo = modbusInfo;
-        this.registeredIntegrations = new ArrayList<>();
         this.ioExecutor = ModbusIoPool.executor();
         if (!skipOpen) {
             openModbus();
@@ -153,7 +168,7 @@ public class ModbusSource {
      * @param serialInfo 串口配置
      * @param serialSource 来自 serial integration 的串口资源
      */
-    protected void initSerialMaster(ModbusSerialInfo serialInfo, com.ecat.integration.SerialIntegration.SerialSource serialSource) {
+    protected void initSerialMaster(ModbusSerialInfo serialInfo, SerialSource serialSource) {
         try {
             this.modbusMaster = ModbusMasterFactory.createSerialMaster(serialInfo, serialSource);
             modbusMaster.init();
@@ -186,17 +201,49 @@ public class ModbusSource {
         }
         String txnId = "mb-" + TXN_COUNTER.incrementAndGet();
         long startNanos = System.nanoTime();
-        CommTraceBuffer.instance().tx(transport, portId, encodeMessage(request), txnId);
+        // 捕获点权威归因（io-resource-owner §5.3）：帧归属=当前持锁 owner（modbus 事务恒在
+        // 锁内发起，同连接多 slave 逐笔归属）；无锁/LEGACY 时落源注册兜底（见
+        // frameAttributionOwner——归因次序 owner > MDC > 回填在 CommTraceBuffer 仍成立）。
+        // 单次取值冻结 TX/RX 同帧同主（事务硬超时清锁不撕裂同一对的归因）。
+        ResourceOwner frameOwner = frameAttributionOwner();
+        CommTraceBuffer.instance().tx(transport, portId, encodeMessage(request), txnId, frameOwner);
         try {
             ModbusMessage response = modbusMaster.send(request);
             double durationMs = (System.nanoTime() - startNanos) / 1_000_000.0;
             CommTraceBuffer.instance().rx(transport, portId,
-                    response != null ? encodeMessage(response) : new byte[0], txnId, durationMs);
+                    response != null ? encodeMessage(response) : new byte[0], txnId, durationMs, frameOwner);
             return response;
         } catch (ModbusTransportException e) {
             CommTraceBuffer.instance().error(transport, portId);
             throw e;
         }
+    }
+
+    /**
+     * 本帧权威 owner（归因次序：持锁 owner &gt; 源注册兜底 &gt; null 落线程 MDC）。
+     *
+     * <p>无锁兜底（bug-record-20260913-111500）：裸 dispatchIo 读事务（mgd 轮询形态）
+     * 不经源锁，lockAcquireOwner 恒 null，帧归因此前只剩提交线程 MDC——RECONFIGURE
+     * 热加载在 REST 线程重新调度轮询后 MDC 快照丢 coordinate，帧变无主。兜底取本源
+     * 注册账本首个类型化注册者，投影成<b>坐标级</b> owner：无锁路径本无逐笔身份，
+     * 注册者层级无论 ENTRY/DEVICE 一律折到坐标（不引入 MDC 时代不存在的设备维度；
+     * 有锁路径的逐笔 DEVICE 归因不受影响）。
+     *
+     * <p>确定性：账本 ConcurrentHashMap 同键集迭代序确定，多注册者取迭代首位——同连接
+     * 共享源的注册者坐标一致（同集成多设备/同集成多模块），coordinate 投影不受选取
+     * 影响。账本无类型化注册者（空/全 LEGACY）返回 null，维持 MDC 既有次序（LEGACY
+     * 无坐标字段，注入反而压制 MDC 归因，与锁通道同判定）。
+     */
+    private ResourceOwner frameAttributionOwner() {
+        if (lockAcquireOwner != null) {
+            return lockAcquireOwner;
+        }
+        for (ResourceOwner owner : registeredOwners.values()) {
+            if (owner.getLevel() != OwnerLevel.LEGACY) {
+                return ResourceOwner.integration(owner.getCoordinate());
+            }
+        }
+        return null;
     }
 
     /** modbus4j 消息 → 编码字节（write 落 ByteQueue 后整体取出）。 */
@@ -326,7 +373,7 @@ public class ModbusSource {
      * 实现细节，均不得作正确性依赖），且事务内并行段（saimosen allOf 四段读、tyxdgroup
      * thenCombine 双读这类「急切多读」形态）不放大池占用（live 实证：信号量在池内等许可
      * 的形态令 saimosen 单事务占 4 线程、9 源即饱和 16 线程池——本形态为修订定稿）。
-     * 跨事务互斥仍由源锁保证（tryAcquire 锁忙即弃）。
+     * 跨事务互斥仍由源锁保证（轮询经 acquirePollingBounded 有界等待，预算耗尽才弃轮）。
      *
      * <p>失败表面不变：请求构造/传输异常（ModbusTransportException，构造与 send 同域——
      * 原「写在调用线程构造、读在池内构造」两形态统一）→ CF 完成值 null（调用方 null 语义
@@ -478,12 +525,41 @@ public class ModbusSource {
         return modbusInfo.getRequestTimeoutMs();
     }
 
+    /**
+     * LEGACY 字符串身份注册（迁移过渡期旧签名）：包装 legacy owner 入账，与类型化
+     * owner 同账本混存。新代码走 {@link #registerIntegration(ResourceOwner)}。
+     *
+     * @param identity 注册方字符串身份
+     */
     public void registerIntegration(String identity) {
-        registeredIntegrations.add(identity);
+        registerIntegration(ResourceOwner.legacy(identity));
     }
 
+    /**
+     * 注册方 owner 入账（io-resource-owner §5.3 账本）：同 ownerKey 重注册天然去重；
+     * 摘账走 {@link #closeModbus(ResourceOwner)}，账本摘空才销毁底层资源（引用计数语义
+     * 不变，仅记账粒度从字符串升为 owner）。
+     *
+     * @param owner 注册方 owner（设备/入口/集成层均可）
+     */
+    public void registerIntegration(ResourceOwner owner) {
+        Objects.requireNonNull(owner, "owner");
+        registeredOwners.put(owner.ownerKey(), owner);
+    }
+
+    /** LEGACY 字符串身份摘账（迁移过渡期旧签名）。 */
     protected void removeIntegration(String identity) {
-        registeredIntegrations.remove(identity);
+        removeIntegration(ResourceOwner.legacy(identity));
+    }
+
+    /** 注册方 owner 摘账（不销毁资源；生命周期收口走 closeModbus(owner)）。 */
+    protected void removeIntegration(ResourceOwner owner) {
+        registeredOwners.remove(owner.ownerKey());
+    }
+
+    /** 注册方 owner 只读快照（账本查询面；拷贝返回，外部修改不回写）。 */
+    List<ResourceOwner> getRegisteredOwners() {
+        return new ArrayList<>(registeredOwners.values());
     }
 
     /**
@@ -491,7 +567,20 @@ public class ModbusSource {
      * @return 锁标识（成功获取或进入等待），null表示无法获取且超出等待队列容量
      */
     public String acquire() {
-        return acquire(waitTimeoutMs, TimeUnit.MILLISECONDS);
+        return acquire(waitTimeoutMs, TimeUnit.MILLISECONDS, null);
+    }
+
+    /**
+     * 带注册 owner 获取锁（io-resource-owner §5.3 锁）：授予点把 owner 登记为
+     * {@code lockAcquireOwner}（事务期间 TX/RX 捕获点的权威归因来源），
+     * release/幽灵锁收割与 key 同一状态机清除。LEGACY owner 请传 null——LEGACY 无设备
+     * 身份字段，注入反而会压制线程 MDC 归因（过渡期行为不得回退）。
+     *
+     * @param owner 本次事务的注册 owner（null=无主事务，保持现状）
+     * @return 锁标识（成功获取或进入等待），null表示无法获取且超出等待队列容量
+     */
+    public String acquire(ResourceOwner owner) {
+        return acquire(waitTimeoutMs, TimeUnit.MILLISECONDS, owner);
     }
 
     /**
@@ -502,6 +591,19 @@ public class ModbusSource {
      *         或唤醒后锁已被快速路径请求抢占（handed-off race 失败，按未取得总线重试）
      */
     public String acquire(long timeout, TimeUnit unit) {
+        return acquire(timeout, unit, null);
+    }
+
+    /**
+     * 锁获取核心（owner 登记版）：两处授予点（快速路径 / 队头交接）均登记
+     * {@code lockAcquireOwner}，与 currentKey 同生共死。
+     *
+     * @param timeout 超时时间
+     * @param unit 时间单位
+     * @param owner 本次事务的注册 owner（null=无主事务）
+     * @return 锁标识；语义同 {@link #acquire(long, TimeUnit)}
+     */
+    public String acquire(long timeout, TimeUnit unit, ResourceOwner owner) {
         String requestKey = generateRequestKey(); // 生成唯一请求标识
         lock.lock();
         try {
@@ -511,6 +613,7 @@ public class ModbusSource {
                 currentKey = requestKey;
                 lockAcquireTime = System.currentTimeMillis();
                 lockAcquireThread = Thread.currentThread().getName();
+                lockAcquireOwner = owner;
                 return requestKey;
             } else {
                 // 检查等待队列是否未满
@@ -536,6 +639,7 @@ public class ModbusSource {
                             currentKey = requestKey;
                             lockAcquireTime = System.currentTimeMillis();
                             lockAcquireThread = Thread.currentThread().getName();
+                            lockAcquireOwner = owner;
                             waitQueue.poll();
                             return requestKey;
                         }
@@ -560,33 +664,93 @@ public class ModbusSource {
         }
     }
 
-    /** 轮询 tryAcquire 锁忙放弃计数（E2/R3 记账：放弃必须可观测，禁静默）。 */
+    /** 轮询真弃轮计数（E2/R3 记账：有界等待预算耗尽才计，禁静默）。 */
     private final AtomicLong lockBusySkipCount = new AtomicLong();
     /** 锁忙放弃日志限频时间戳（锁临界区内读写，ReentrantLock 保证可见性，仅日志用）。 */
     private volatile long lastBusySkipLogAt;
     /** 锁忙放弃日志限频间隔：默认 60s 一条（饱和期 ~30 次/min 的放弃若不限频会刷爆日志）。 */
     static final long BUSY_SKIP_LOG_INTERVAL_MS = 60_000L;
 
-    /** 获取累计锁忙放弃次数（轮询 tryAcquire 因锁忙立即放弃的计数，运行时可观测用）。 */
+    /** 获取累计真弃轮次数（轮询有界等待预算耗尽的计数，运行时可观测用）。 */
     public long getLockBusySkipCount() {
         return lockBusySkipCount.get();
     }
 
     /**
-     * 非阻塞获取锁（轮询专用，E2/R3 终态修复：调度三原则「过期即弃」，与 serial
-     * {@code SerialSourcePort#tryAcquire} 同型）。
+     * 轮询锁获取契约（20260913-073600 修复，方案 c：轮询并入 FIFO 有界等待）：无竞争
+     * 快路径直达；锁忙时把 FIFO 有界等待移交 IO 旁池线程执行——调用线程（SDK 定时线程）
+     * 零 park，轮询重新与写命令同队同公平（deed33d 把轮询踢出等待队列是共享口相位锁定
+     * 饥饿的根因）。
      *
-     * <p>与 {@link #acquire(long, TimeUnit)} 的本质差异：锁忙时<b>不进 waitQueue、不 park
-     * 等待、不消费 signal</b>，立即返回 null——本周期放弃，下周期再试。由此轮询 worker
-     * 永不为等锁 park（秒级阻塞事务不再钉死调度 worker）；waitQueue 名额与 signal 唤醒
-     * 完全留给写命令等有限等待路径。
+     * <p>返回 CF 语义：完成值非 null=锁标识（等待授予发生在旁池线程，事务体随 CF 依赖链
+     * 在同一旁池线程执行，MDC 已恢复到提交时快照）；null=本周期真弃轮（预算耗尽/等待
+     * 队列满/旁池饱和拒绝），源侧记账。等到了锁的轮次不计入
+     * {@link #getLockBusySkipCount()}（观测不说谎）。
      *
-     * <p>锁忙放弃有记账：累计计数 {@link #getLockBusySkipCount()} + 限频 warn 日志。
-     * 幽灵锁收割检查与 {@link #acquire(long, TimeUnit)} 同入口复用。
-     *
-     * @return 锁标识；锁忙时立即返回 null（本周期放弃）
+     * @param budgetMs 锁等待预算（毫秒，须 &gt; 0；SDK 侧按轮询周期 clamp）
+     * @return 锁标识 CF；null 完成=本周期弃轮
      */
-    public String tryAcquire() {
+    public CompletableFuture<String> acquirePollingBounded(long budgetMs) {
+        return acquirePollingBounded(null, budgetMs);
+    }
+
+    /**
+     * 带注册 owner 的轮询锁获取（io-resource-owner §5.3 锁）：授予点登记
+     * {@code lockAcquireOwner}（快路径与队头交接两处，语义同
+     * {@link #acquire(long, TimeUnit, ResourceOwner)}）；LEGACY 传 null。包内可见：
+     * 消费面是 {@code ModbusTransactionStrategy} 与 {@code DeviceSpecificModbusSource}
+     * 的 owner 注入委托，不对集成开放。
+     */
+    CompletableFuture<String> acquirePollingBounded(ResourceOwner owner, long budgetMs) {
+        if (budgetMs <= 0) {
+            throw new IllegalArgumentException("acquirePollingBounded 要求 budgetMs > 0: " + budgetMs);
+        }
+        // 快路径：无竞争轮次零等待、零记账（与旧轮询契约的非阻塞授予段行为一致）
+        String fast = acquireUncontended(owner);
+        if (fast != null) {
+            return CompletableFuture.completedFuture(fast);
+        }
+        // 锁忙：等待移交 IO 旁池线程（定时线程零 park），预算内经 acquire 排队等队头交接。
+        // MDC 提交时捕获、旁池任务内恢复——完成点之后的依赖链（事务体→dispatchIo 帧捕获）
+        // 在旁池线程上携带设备归属上下文，与快路径的定时线程形态归因一致。
+        Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+        CompletableFuture<String> out = new CompletableFuture<>();
+        try {
+            ioExecutor.execute(() -> {
+                Map<String, String> previousMdc = MDC.getCopyOfContextMap();
+                try {
+                    if (mdcContext != null) {
+                        MDC.setContextMap(mdcContext);
+                    }
+                    String key = acquire(budgetMs, TimeUnit.MILLISECONDS, owner);
+                    if (key == null) {
+                        // 真弃轮才记账：预算耗尽/队列满（等到锁的轮次不计，观测不说谎）
+                        recordPollingSkip(budgetMs);
+                    }
+                    out.complete(key);
+                } finally {
+                    if (mdcContext != null) {
+                        if (previousMdc != null) {
+                            MDC.setContextMap(previousMdc);
+                        } else {
+                            MDC.clear();
+                        }
+                    }
+                }
+            });
+        } catch (RejectedExecutionException poolSaturated) {
+            // 旁池饱和（线程+有界队全满）：本周期弃轮，下一周期再试（源可自愈）
+            recordPollingSkip(budgetMs);
+            return CompletableFuture.completedFuture(null);
+        }
+        return out;
+    }
+
+    /**
+     * 无竞争快路径取锁（旧轮询契约的授予段）：锁忙返回 null，等待/弃轮由调用方
+     * 决定——是否真弃轮取决于等待结果，记账不在此处。
+     */
+    private String acquireUncontended(ResourceOwner owner) {
         String requestKey = generateRequestKey();
         lock.lock();
         try {
@@ -595,17 +759,30 @@ public class ModbusSource {
                 currentKey = requestKey;
                 lockAcquireTime = System.currentTimeMillis();
                 lockAcquireThread = Thread.currentThread().getName();
+                lockAcquireOwner = owner;
                 return requestKey;
             }
-            long skips = lockBusySkipCount.incrementAndGet();
+            return null;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * 真弃轮记账（E2/R3 可观测性：放弃必须可计数，禁静默）：计数 + 限频 warn。
+     * 持锁方快照在锁内取，避免读到撕裂的 currentKey/时间戳组合。
+     */
+    private void recordPollingSkip(long budgetMs) {
+        long skips = lockBusySkipCount.incrementAndGet();
+        lock.lock();
+        try {
             long now = System.currentTimeMillis();
             if (now - lastBusySkipLogAt >= BUSY_SKIP_LOG_INTERVAL_MS) {
                 lastBusySkipLogAt = now;
-                log.warn("Polling tryAcquire skipped (lock busy): modbusInfo=" + modbusInfo
+                log.warn("Polling bounded-acquire budget exhausted (" + budgetMs + "ms): modbusInfo=" + modbusInfo
                         + ", total skips=" + skips + ", lock currently held by: " + currentKey
                         + " (acquired at " + lockAcquireTime + " by thread " + lockAcquireThread + ")");
             }
-            return null;
         } finally {
             lock.unlock();
         }
@@ -623,6 +800,7 @@ public class ModbusSource {
                 currentKey = null;
                 lockAcquireTime = 0;
                 lockAcquireThread = null;
+                lockAcquireOwner = null;
                 // 唤醒下一个等待的请求
                 if (!waitQueue.isEmpty()) {
                     condition.signal(); // 唤醒等待队列中的第一个线程
@@ -634,6 +812,11 @@ public class ModbusSource {
         } finally {
             lock.unlock();
         }
+    }
+
+    /** 当前持锁 owner（观测面；null=无主/已清）。sendTraced 捕获点直读同名字段。 */
+    ResourceOwner getLockAcquireOwner() {
+        return lockAcquireOwner;
     }
 
     private String generateRequestKey() {
@@ -666,6 +849,7 @@ public class ModbusSource {
         currentKey = null;
         lockAcquireTime = 0;
         lockAcquireThread = null;
+        lockAcquireOwner = null;
         if (!waitQueue.isEmpty()) {
             condition.signal();
         }
@@ -692,22 +876,40 @@ public class ModbusSource {
         throw new UnsupportedOperationException("Subclasses must implement closeModbus()");
     }
 
+    /**
+     * LEGACY 字符串身份注销（迁移过渡期旧签名）：包装 legacy owner 走 owner 摘账路径。
+     *
+     * @param identity 注册时使用的字符串身份
+     * @throws IllegalArgumentException 身份未注册
+     */
     public void closeModbus(String identity) {
-        // Check if identity exists in registered integrations
-        if (!registeredIntegrations.contains(identity)) {
-            throw new IllegalArgumentException("Identity not found: " + identity);
+        closeModbus(ResourceOwner.legacy(identity));
+    }
+
+    /**
+     * 注册方 owner 注销（io-resource-owner §5.3）：从账本摘除本 owner 条目；账本摘空才
+     * 销毁底层资源（引用计数语义不变，粒度从字符串升为 owner——同连接多设备各摘各的）。
+     *
+     * @param owner 注册时的 owner（ownerKey 等价即视为同一注册方）
+     * @throws IllegalArgumentException owner 未注册
+     */
+    public void closeModbus(ResourceOwner owner) {
+        Objects.requireNonNull(owner, "owner");
+        // Check if owner exists in ledger
+        if (!registeredOwners.containsKey(owner.ownerKey())) {
+            throw new IllegalArgumentException("Identity not found: " + owner.ownerKey());
         }
 
-        // Remove the integration from registered list
-        registeredIntegrations.remove(identity);
+        // Remove the owner from ledger
+        registeredOwners.remove(owner.ownerKey());
 
-        // Only close Modbus if no integrations are registered
-        if (registeredIntegrations.isEmpty()) {
+        // Only close Modbus if no owners are registered
+        if (registeredOwners.isEmpty()) {
             destroyResources();
-            log.info( "Modbus connection closed by " + identity);
+            log.info( "Modbus connection closed by " + owner.ownerKey());
         } else {
-            log.info( "Identity removed but connection kept open: " + identity +
-                              ", remaining integrations: " + registeredIntegrations.size());
+            log.info( "Identity removed but connection kept open: " + owner.ownerKey() +
+                              ", remaining integrations: " + registeredOwners.size());
         }
     }
 

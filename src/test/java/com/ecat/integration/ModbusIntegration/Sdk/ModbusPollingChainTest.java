@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,7 +47,8 @@ import com.ecat.integration.ModbusIntegration.ModbusTcpInfo;
  *   <li>宿主绑定：start 注册恰好一条移除动作，执行即撤待发拍。</li>
  * </ul>
  * 真实锁状态机 source（skipOpen 不建 master 零网络；匿名子类越 protected 构造边界）；
- * 全部断言以「捕获的单发记录 + 手动到拍」表达，无 Thread.sleep。
+ * 全部断言以「捕获的单发记录 + 手动到拍」表达，无 Thread.sleep。例外：锁忙消化用例的
+ * 弃轮在 FIFO 有界等待预算（真实 ~500ms）到点后发生——事件闩等报告落账，仍非 sleep 猜测。
  */
 public class ModbusPollingChainTest {
 
@@ -280,24 +282,47 @@ public class ModbusPollingChainTest {
 
         AtomicInteger roundInvocations = new AtomicInteger();
         List<RoundReport> reports = new CopyOnWriteArrayList<>();
+        CountDownLatch lockBusyReported = new CountDownLatch(1);
         PollingHandle handle = ModbusPolling.on(host, source)
                 .round(src -> {
                     roundInvocations.incrementAndGet();
                     return CompletableFuture.completedFuture(Boolean.TRUE);
                 })
                 .every(5, TimeUnit.SECONDS)
-                .onRound(reports::add)
+                .onRound(report -> {
+                    reports.add(report);
+                    lockBusyReported.countDown();
+                })
                 .withNanoClock(nanoClock::get)
                 .start();
-        timers.fire(0); // 首轮：锁忙 → LockBusySkipped 异常 future（同步完成）
+        // 首轮：锁忙 → FIFO 有界等待（预算 period÷4 clamp=500ms）耗尽后才弃轮——弃轮发生在
+        // IO 旁池线程，异步于 fire 返回，事件闩等报告落账（非固定 sleep 猜测）
+        timers.fire(0);
+        assertTrue("锁忙轮应在有界等待预算耗尽后报告 LOCK_BUSY_SKIPPED",
+                lockBusyReported.await(5, TimeUnit.SECONDS));
 
         assertEquals("锁被外部持有时 round 体不得执行", 0, roundInvocations.get());
         assertEquals("锁忙轮必须报告 LOCK_BUSY_SKIPPED（SDK 内部消化语义可观测）",
                 RoundReport.Outcome.LOCK_BUSY_SKIPPED, reports.get(reports.size() - 1).getOutcome());
+        awaitShotCount(2);
         assertEquals("锁忙跳拍后照常重排下一拍（网格不变）", 2, timers.shots.size());
         assertEquals("锁忙跳拍必须计入源级记账（禁静默）", 1L, source.getLockBusySkipCount());
         assertTrue(source.release(held));
         handle.cancel();
+    }
+
+    /**
+     * 重排事件等待（deadline 轮询验证事件已发生，超时即失败）：结算续段在事务完成线程
+     * （IO 旁池）上异步提交下一拍，报告落账后立即读 shots 是竞态。
+     */
+    private void awaitShotCount(int expected) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (timers.shots.size() < expected) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("下一拍未在 5s 内重排落账: expected>=" + expected
+                        + ", actual=" + timers.shots.size());
+            }
+        }
     }
 
     @Test

@@ -274,7 +274,8 @@ public final class ModbusPolling {
         final long roundIndex = roundSeq.incrementAndGet();
 
         final long startNanos = System.nanoTime();
-        CompletableFuture<Boolean> transaction = ModbusTransactionStrategy.executePolling(source, round);
+        CompletableFuture<Boolean> transaction = ModbusTransactionStrategy.executePolling(
+                source, lockWaitBudgetMs(), round);
         return transaction.handle((result, error) -> {
             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
             if (error != null) {
@@ -306,6 +307,15 @@ public final class ModbusPolling {
             }
             return result;
         });
+    }
+
+    /**
+     * 轮询锁等待预算（20260913-073600 方案 c）：period÷4，clamp [200, 500]ms——锁忙时在
+     * 预算内与写命令同队公平等待，耗尽才弃轮。上界 500ms：秒级周期下等待 duty 不侵蚀轮询
+     * 节奏；下界 200ms：毫秒级周期也给对端事务留出收尾窗口。
+     */
+    long lockWaitBudgetMs() {
+        return Math.max(200L, Math.min(500L, periodMs / 4));
     }
 
     /** onRound 通知（观测面隔离：调用方代码异常只记 warn，不破坏轮询主链）+ 断连态转移。 */
