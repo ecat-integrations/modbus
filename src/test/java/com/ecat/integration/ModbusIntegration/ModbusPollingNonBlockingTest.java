@@ -115,6 +115,11 @@ public class ModbusPollingNonBlockingTest {
                     doneAt[0] = System.nanoTime();
                     return CompletableFuture.completedFuture(true);
                 });
+        // 入队序栅栏：executePolling 的 acquire 在 IO 旁池线程入队，提交序≠入队序——
+        // 不等 first 入队就提交 second，second 可能先入队，FIFO 按入队序授予会让
+        // doneAt[1] 先刻（高并行负载下实证翻车）。先等 first 入队，入队序才确定
+        // 为 [first, second]，断言测的才是「按入队序授予」这一契约本身
+        awaitWaitingCount(source, 1);
         CompletableFuture<Boolean> second = ModbusTransactionStrategy.executePolling(
                 source, src -> {
                     doneAt[1] = System.nanoTime();
