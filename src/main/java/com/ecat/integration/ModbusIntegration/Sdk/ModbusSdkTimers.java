@@ -104,7 +104,8 @@ public final class ModbusSdkTimers {
      * {@link CompletableFuture}，经本域定时器 MDC 包装单发到点完成（提交时捕获上下文、
      * 到拍恢复）。round 体内块间留隙可达轮询实例，优先实例糖
      * {@link ModbusPolling#delay(long)}；本静态入口供无实例上下文的命令型设备延迟写
-     * （生产消费：qdrgdz 校时命令 / saimosen 颗粒物零点检查 / tianhong 远程校准）。
+     * （生产消费：qdrgdz StationCommandAttribute 工位切换命令的锁外 settle 等待 /
+     * saimosen 颗粒物零点检查 / tianhong 远程校准）。
      * 把「撤销待发拍」注册进 {@code host.onRemove}（RemovalHost 移除生命周期，纯标记
      * cancel 不打断在飞执行——非阻塞契约天然合规），满足写路径 IO 副作用的 stop 可撤
      * 契约：宿主 sweep 后 pending 延迟不再发射，返回的 CF 不完成（消费链随宿主死亡
