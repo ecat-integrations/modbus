@@ -1,5 +1,7 @@
 package com.ecat.integration.ModbusIntegration.Sdk;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -41,6 +43,11 @@ import com.ecat.integration.ModbusIntegration.ModbusTransactionStrategy;
  * Boolean=本轮业务成功（false 触发统一 warn），异常=传输错误（统一 error）。多段
  * thenCompose/allOf 链一等公民（saimosen 多段并行形态原样可搬）。
  *
+ * <p><b>多段轮 roundChain</b>：块间需留隙的多块读设备用 {@link #roundChain()} 声明
+ * （{@code held(gap held)* end}）——每段独立源锁事务、段间留隙在锁外（写者可在留隙窗
+ * 取锁）；体内 delay 留隙的单段 round() 形态整轮持锁，仅适合锁内短节拍。段体 false/异常
+ * 中止不追读后续段，轮结局分类与单段形态一致。
+ *
  * <p><b>周期语义与调度自持</b>（29 号 v2 S1：modbus 域脱离 core 调度引擎）：周期链 =
  * core 库 {@link PeriodicRunner}/{@link PeriodicChain}（完成点重排/逐轮 MDC/句柄竞态
  * 收口/永不注销由 core 统一承载）+ 域自持定时池 {@link ModbusSdkTimers}（daemon 命名
@@ -73,8 +80,17 @@ public final class ModbusPolling {
     private final RemovalHost host;
     private final ModbusSource source;
 
-    /** 每轮读什么（必选，声明一次）。 */
+    /** 每轮读什么（必选，声明一次；单段 round() 形态或多段 roundChain() 形态二选一）。 */
     private Function<ModbusSource, CompletableFuture<Boolean>> round;
+    /**
+     * 多段轮声明（{@link #roundChain()} 链上逐段登记；null = 未声明，单段 round() 形态）。
+     * 声明期单线程构建、运行期只读，无需并发容器。
+     */
+    private List<Function<ModbusSource, CompletableFuture<Boolean>>> chainSegments;
+    /** 与 chainSegments 对齐的段间留隙毫秒（size = 段数-1；end() 校验）。 */
+    private List<Long> chainGaps;
+    /** roundChain() 已起建标志（段尚未声明也锁定与 round() 的互斥——声明不得半途换轨）。 */
+    private boolean chainDeclared;
     /** 周期（必选，毫秒，正数）。 */
     private long periodMs = -1L;
     /** 首轮延迟（毫秒，默认 0——立即发起首轮）。 */
@@ -129,8 +145,90 @@ public final class ModbusPolling {
         if (this.round != null) {
             throw new IllegalStateException("round 已声明过（每轮读什么只能有一个定义）");
         }
+        if (chainDeclared) {
+            throw new IllegalStateException("roundChain 已声明过，round() 与 roundChain() 互斥");
+        }
         this.round = round;
         return this;
+    }
+
+    /**
+     * 声明多段轮（与 round() 互斥，二选一）：每段 {@link RoundChain#held} 是一个独立源锁
+     * 事务（独立预算取锁、独立硬超时、完成即释放），相邻段之间 {@link RoundChain#gap}
+     * 留隙在源锁临界区之外——设备性能要求的块间节拍不再变成持锁时长（整轮单事务形态下
+     * 体内 delay 留隙会把锁持有到轮末，挤爆写命令的有界等待预算）。
+     */
+    public RoundChain roundChain() {
+        if (round != null) {
+            throw new IllegalStateException("round 已声明过，roundChain() 与 round() 互斥");
+        }
+        if (chainDeclared) {
+            throw new IllegalStateException("roundChain 已声明过（每轮读什么只能有一个定义）");
+        }
+        chainDeclared = true;
+        return new RoundChain();
+    }
+
+    /**
+     * 多段轮声明链（{@link #roundChain()} 起建）：{@code held(gap held)* end} 的声明序
+     * 由状态机 fail-fast 保证（gap 必须夹在两段之间、不得重复/尾随；end 校验 gap 数 =
+     * 段数-1）。段体契约与 round() 段一致（Boolean=业务成功，异常=传输错误）；段体 false
+     * 或异常 ⇒ 中止不追读后续段，轮结局=该段结局。声明期单线程、运行期只读。
+     */
+    public final class RoundChain {
+
+        /** 声明状态：0=待首段，1=待 gap 或 end（上一声明是 held），2=待 held（上一声明是 gap）。 */
+        private int state;
+        private boolean ended;
+
+        /** 声明一段轮体（独立源锁事务；签名与 round() 一致，迁移=搬函数体）。 */
+        public RoundChain held(Function<ModbusSource, CompletableFuture<Boolean>> segment) {
+            if (segment == null) {
+                throw new IllegalArgumentException("held(null) 不允许");
+            }
+            if (ended) {
+                throw new IllegalStateException("roundChain 已 end()，不得再 held");
+            }
+            if (chainSegments == null) {
+                chainSegments = new ArrayList<>();
+                chainGaps = new ArrayList<>();
+            }
+            chainSegments.add(segment);
+            state = 1;
+            return this;
+        }
+
+        /** 声明与上一段之间的留隙毫秒（锁外节拍；须 &gt; 0——零留隙无意义，别调 gap）。 */
+        public RoundChain gap(long ms) {
+            if (ms <= 0) {
+                throw new IllegalArgumentException("gap(ms) 要求 ms > 0（零留隙无意义）: " + ms);
+            }
+            if (state != 1) {
+                throw new IllegalStateException("gap 必须紧跟在 held 之后且不得连续声明");
+            }
+            chainGaps.add(ms);
+            state = 2;
+            return this;
+        }
+
+        /** 完成多段轮声明，回到 polling 继续周期/启动声明。 */
+        public ModbusPolling end() {
+            if (ended) {
+                throw new IllegalStateException("roundChain 只能 end() 一次");
+            }
+            if (chainSegments == null || chainSegments.isEmpty()) {
+                throw new IllegalStateException("end() 前至少声明一段 held(...)");
+            }
+            if (state != 1) {
+                throw new IllegalStateException("end() 前必须以 held(...) 收尾（尾随 gap 无所属段）");
+            }
+            if (chainGaps.size() != chainSegments.size() - 1) {
+                throw new IllegalStateException("gap 数必须 = 段数-1，实际: gaps="
+                        + chainGaps.size() + ", segments=" + chainSegments.size());
+            }
+            ended = true;
+            return ModbusPolling.this;
+        }
     }
 
     /** 声明轮询周期（必选）：默认 fixedDelay 语义（本轮事务完成点 + period = 下轮发射点）。 */
@@ -185,7 +283,8 @@ public final class ModbusPolling {
 
     /**
      * 到点单发糖（B 族收编备用）：{@code ms} 毫秒后正常完成的 {@link CompletableFuture}，
-     * 经域自持定时器提交（MDC 传播内置）。round 体内多段块读之间留隙以适应设备性能：
+     * 经域自持定时器提交（MDC 传播内置）。round 体内多段块读之间留隙以适应设备性能
+     * （留隙属在飞轮次、源锁全程持有；块间需锁外留隙的多块读用 {@link #roundChain()}）：
      * <pre>{@code
      * ModbusPolling polling = ModbusPolling.on(this, source);
      * polling.round(src -> src.readHoldingRegisters(B1.start, B1.count)
@@ -232,8 +331,9 @@ public final class ModbusPolling {
      * @return 轮询生命周期句柄（cancel 幂等；生命周期已内绑宿主，无需调用方保存 cancel）
      */
     public PollingHandle start() {
-        if (round == null) {
-            throw new IllegalStateException("ModbusPolling.start() 前必须声明 round(...)（每轮读什么）");
+        if (round == null && chainSegments == null) {
+            throw new IllegalStateException(
+                    "ModbusPolling.start() 前必须声明 round(...) 或完整 roundChain()（每轮读什么）");
         }
         if (periodMs <= 0) {
             throw new IllegalStateException("ModbusPolling.start() 前必须声明 every(period, unit)（多久一轮）");
@@ -255,8 +355,9 @@ public final class ModbusPolling {
         // SDK 内绑宿主生命周期（18 号 §3.3）：设备移除 sweep 执行本动作即停轮询；
         // cancel 纯标记不中断在飞事务（非阻塞契约），幂等与 sweep 二次调用天然兼容
         host.onRemove(handle::cancel);
-        log.info("ModbusPolling 启动: {}, period: {}ms, mode: {}", label(), periodMs,
-                fixedRate ? "fixedRate" : "fixedDelay");
+        log.info("ModbusPolling 启动: {}, period: {}ms, mode: {}, 轮体: {}", label(), periodMs,
+                fixedRate ? "fixedRate" : "fixedDelay",
+                chainSegments != null ? "roundChain×" + chainSegments.size() : "round");
         return handle;
     }
 
@@ -274,8 +375,9 @@ public final class ModbusPolling {
         final long roundIndex = roundSeq.incrementAndGet();
 
         final long startNanos = System.nanoTime();
-        CompletableFuture<Boolean> transaction = ModbusTransactionStrategy.executePolling(
-                source, lockWaitBudgetMs(), round);
+        CompletableFuture<Boolean> transaction = chainSegments != null
+                ? executeChain()
+                : ModbusTransactionStrategy.executePolling(source, lockWaitBudgetMs(), round);
         return transaction.handle((result, error) -> {
             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
             if (error != null) {
@@ -316,6 +418,30 @@ public final class ModbusPolling {
      */
     long lockWaitBudgetMs() {
         return Math.max(200L, Math.min(500L, periodMs / 4));
+    }
+
+    /**
+     * 多段轮折叠（roundChain 形态的轮体）：段一立即执行；相邻段之间经 {@link #delay(long)}
+     * 留隙——留隙窗在源锁临界区之外（上一段事务完成时已在策略层 whenComplete 释放源锁，
+     * 写命令可在窗内取锁；本段到点重新走既有有界取锁排队，与写者 FIFO 同队）。段体显式
+     * false（轮契约唯一业务失败标记）或异常 ⇒ 不追读后续段（聚合 CF 以该值/异常收尾，
+     * 分类交 runRound 统一处理）。gap 单发属在飞轮次的一部分（同 delay 糖），不注册移除动作。
+     */
+    private CompletableFuture<Boolean> executeChain() {
+        CompletableFuture<Boolean> round = ModbusTransactionStrategy.executePolling(
+                source, lockWaitBudgetMs(), chainSegments.get(0));
+        for (int i = 1; i < chainSegments.size(); i++) {
+            Function<ModbusSource, CompletableFuture<Boolean>> next = chainSegments.get(i);
+            long gapMs = chainGaps.get(i - 1);
+            round = round.thenCompose(previous -> {
+                if (Boolean.FALSE.equals(previous)) {
+                    return CompletableFuture.completedFuture(Boolean.FALSE);
+                }
+                return delay(gapMs).thenCompose(gapDone ->
+                        ModbusTransactionStrategy.executePolling(source, lockWaitBudgetMs(), next));
+            });
+        }
+        return round;
     }
 
     /** onRound 通知（观测面隔离：调用方代码异常只记 warn，不破坏轮询主链）+ 断连态转移。 */
