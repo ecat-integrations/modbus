@@ -118,7 +118,10 @@ public class ModbusTransactionStrategy {
      * 非阻塞（IO 经 dispatchIo），线程面差异无语义影响。
      *
      * <p><b>边界</b>：只供周期轮询任务体使用；属性写与需要有限等待语义的调用方继续走
-     * {@code executeWithLambda}（闸内 IO 体对锁的等待保留）。
+     * {@code executeWithLambda}（闸内 IO 体对锁的等待保留）。本入口把整个 lambda 包进
+     * 单次源锁事务，只适用于「一次轮询、过程中无等待、无分段交互」的单段轮体——轮体内
+     * 含 delay/块间留隙等待的设备必须改走 {@code ModbusPolling#roundChain()}（每段独立
+     * 事务、留隙在锁外），否则整轮持锁=各块 IO+等待总和，挤爆写命令的有界取锁预算。
      *
      * <p>取锁成功后的事务体/硬超时/release/传输强拆链路与 {@code executeWithLambda} 完全
      * 共享（{@link #executeHeld}），F-16 的收割/恢复机制不受影响。

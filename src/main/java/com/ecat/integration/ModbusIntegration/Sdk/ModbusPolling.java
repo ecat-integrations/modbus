@@ -40,12 +40,17 @@ import com.ecat.integration.ModbusIntegration.ModbusTransactionStrategy;
  *
  * <p><b>round 契约</b>：{@code Function<ModbusSource, CompletableFuture<Boolean>>}——入参是
  * 已持锁的 source（事务体与既有 executePolling lambda 同签名，迁移=搬函数体）；
- * Boolean=本轮业务成功（false 触发统一 warn），异常=传输错误（统一 error）。多段
- * thenCompose/allOf 链一等公民（saimosen 多段并行形态原样可搬）。
+ * Boolean=本轮业务成功（false 触发统一 warn），异常=传输错误（统一 error）。
+ *
+ * <p><b>round 适用边界（避坑）</b>：round() 只承载「一次轮询、过程中无等待、无分段
+ * 交互」的单段事务——体内零 delay 的纯读链（thenCompose/allOf 串联、毫秒级完成）仍是
+ * 一等公民。轮体内需要块间等待或设备节拍交互时<b>必须</b>改用 {@link #roundChain()}：
+ * round 体内的 delay 发生在源锁临界区内，整轮持锁时长=各块 IO+等待总和，会挤爆写命令
+ * 的有界取锁预算（实测满载链路下写命令秒级超时、整条校准流程失败）。
  *
  * <p><b>多段轮 roundChain</b>：块间需留隙的多块读设备用 {@link #roundChain()} 声明
  * （{@code held(gap held)* end}）——每段独立源锁事务、段间留隙在锁外（写者可在留隙窗
- * 取锁）；体内 delay 留隙的单段 round() 形态整轮持锁，仅适合锁内短节拍。段体 false/异常
+ * 取锁）；含等待的轮一律走本形态，round() 体内不留任何 delay 留隙。段体 false/异常
  * 中止不追读后续段，轮结局分类与单段形态一致。
  *
  * <p><b>周期语义与调度自持</b>（29 号 v2 S1：modbus 域脱离 core 调度引擎）：周期链 =
@@ -80,7 +85,12 @@ public final class ModbusPolling {
     private final RemovalHost host;
     private final ModbusSource source;
 
-    /** 每轮读什么（必选，声明一次；单段 round() 形态或多段 roundChain() 形态二选一）。 */
+    /**
+     * 每轮读什么（必选，声明一次；单段 round() 形态或多段 roundChain() 形态二选一）。
+     * round() 适用边界：一次轮询、过程中无等待、无分段交互的单段事务——体内不得出现
+     * delay 留隙（delay 发生在源锁临界区内，整轮持锁=各块 IO+等待总和，挤爆写命令的
+     * 有界取锁预算）。块间需等待/节拍交互的多段轮必须改用 {@link #roundChain()}。
+     */
     private Function<ModbusSource, CompletableFuture<Boolean>> round;
     /**
      * 多段轮声明（{@link #roundChain()} 链上逐段登记；null = 未声明，单段 round() 形态）。
@@ -283,18 +293,25 @@ public final class ModbusPolling {
 
     /**
      * 到点单发糖（B 族收编备用）：{@code ms} 毫秒后正常完成的 {@link CompletableFuture}，
-     * 经域自持定时器提交（MDC 传播内置）。round 体内多段块读之间留隙以适应设备性能
-     * （留隙属在飞轮次、源锁全程持有；块间需锁外留隙的多块读用 {@link #roundChain()}）：
+     * 经域自持定时器提交（MDC 传播内置）。只用于锁外的一次性到点延迟（如 start 序列里
+     * 两条命令之间的节拍）。
+     *
+     * <p><b>避坑：不得用于 round() 体内做块间留隙</b>——delay 等待发生在源锁临界区内，
+     * 整轮持锁时长=各块 IO+等待总和，挤爆写命令的有界取锁预算（实测满载链路下写命令
+     * 秒级超时、整条校准流程失败）。块间需留隙的多块读一律用 {@link #roundChain()} 的
+     * {@code gap(ms)}（留隙在锁外，写者可在留隙窗取锁）：
      * <pre>{@code
-     * ModbusPolling polling = ModbusPolling.on(this, source);
-     * polling.round(src -> src.readHoldingRegisters(B1.start, B1.count)
-     *                 .thenCompose(v -> polling.delay(50))          // 块间留隙 50ms
-     *                 .thenCompose(v -> src.readHoldingRegisters(B2.start, B2.count))
+     * ModbusPolling.on(this, source)
+     *         .roundChain()
+     *         .held(src -> src.readHoldingRegisters(B1.start, B1.count)
      *                 .thenApply(v -> Boolean.TRUE))
+     *         .gap(50)                                             // 块间留隙 50ms，锁外
+     *         .held(src -> src.readHoldingRegisters(B2.start, B2.count)
+     *                 .thenApply(v -> Boolean.TRUE))
+     *         .end()
      *         .every(5, TimeUnit.SECONDS)
      *         .start();
      * }</pre>
-     * 设备侧两步构建（先建 polling 再挂 round/start）保证 round 体可无竞态引用本方法。
      * 延迟属在飞轮次的一部分，不注册移除动作（RemovalHost 非阻塞契约；链 cancel 后迟到
      * 完成无人消费，无害）。
      *
