@@ -79,8 +79,12 @@ public class ModbusTransactionStrategy {
         if (key!=null) {
             return executeHeld(source, key, lambda);
         } else {
+            // 持锁者快照（LOCKRCA 建议A）：maxWaiters/currentWaitingCount 计数区分不了
+            // 「持锁者卡顿持有中」与「等待期间已自愈释放」（VERALIGN 实录 maxWaiters=10/
+            // currentWaiting=0 怪形态）——快照 lock currently held by/free 直读其一。
             log.error("Failed to acquire lock, modbusInfo: " + source.getModbusInfo().toString() + ", maxWaiters: " + source.getMaxWaiters()
-                    + ", currentWaitingCount: " + source.getWaitingCount());
+                    + ", currentWaitingCount: " + source.getWaitingCount()
+                    + ", " + source.lockHolderSnapshot());
             CompletableFuture<Boolean> failedFuture = new CompletableFuture<>();
             failedFuture.completeExceptionally(new IllegalStateException("Failed to acquire lock"));
             return failedFuture;

@@ -104,6 +104,25 @@ public class ModbusSource {
         }
         this.ghostReapThresholdMs = thresholdMs;
     }
+
+    /**
+     * 慢持锁打点阈值：健康段事务持锁 ms 级（sim RTT 0.12~1.13ms 量纲），>1s 即进入卡顿带
+     * （5-12s 自愈带下缘之下）。自愈型卡顿无任何错误日志、12s 硬超时与 300s 幽灵收割都
+     * 不会触发，release 点必须留一行痕迹（持锁方身份+时长），否则偶发现场只余等待方的
+     * 超时签名，持锁方是谁无从定案（LOCKRCA 建议A 可观测性）。
+     */
+    static final long DEFAULT_SLOW_HOLD_WARN_THRESHOLD_MS = 1_000L;
+    private long slowHoldWarnThresholdMs = DEFAULT_SLOW_HOLD_WARN_THRESHOLD_MS;
+
+    /**
+     * 红测注入口：缩短慢持锁打点阈值（仅同包测试使用；生产用默认 1 秒）。
+     */
+    void setSlowHoldWarnThresholdMsForTest(long thresholdMs) {
+        if (thresholdMs <= 0) {
+            throw new IllegalArgumentException("slowHoldWarnThresholdMs must be > 0, got: " + thresholdMs);
+        }
+        this.slowHoldWarnThresholdMs = thresholdMs;
+    }
     // 通讯帧捕获事务配对序号（TX/RX 同 txnId）
     private static final AtomicLong TXN_COUNTER = new AtomicLong(0);
 
@@ -651,7 +670,12 @@ public class ModbusSource {
                     } else {
                         // 超时处理
                         waitQueue.remove(requestKey); // 从队列移除超时请求
-                        log.error( "Acquire timeout: " + requestKey + ", modbusInfo: " + modbusInfo.toString());
+                        // 持锁者真相（LOCKRCA 建议A，对齐 serial 版 Acquire timeout 样板）：
+                        // 完整等待预算内零 release 只能是持锁事务卡顿，超时行必须能直读持锁者
+                        // 身份（key/线程/owner）+已持时长+剩余等待者数，否则偶发卡顿现场
+                        // （容器日志随容器销毁）不可回溯即失证。本行在 lock 临界区内，快照无撕裂。
+                        log.error("Acquire timeout: " + requestKey + ", modbusInfo: " + modbusInfo.toString()
+                                + ", " + lockHolderSnapshotLocked() + ", waiters=" + waitQueue.size());
                         return null;
                     }
                 } else {
@@ -780,8 +804,7 @@ public class ModbusSource {
             if (now - lastBusySkipLogAt >= BUSY_SKIP_LOG_INTERVAL_MS) {
                 lastBusySkipLogAt = now;
                 log.warn("Polling bounded-acquire budget exhausted (" + budgetMs + "ms): modbusInfo=" + modbusInfo
-                        + ", total skips=" + skips + ", lock currently held by: " + currentKey
-                        + " (acquired at " + lockAcquireTime + " by thread " + lockAcquireThread + ")");
+                        + ", total skips=" + skips + ", " + lockHolderSnapshotLocked());
             }
         } finally {
             lock.unlock();
@@ -797,6 +820,15 @@ public class ModbusSource {
         lock.lock();
         try {
             if (currentKey != null && currentKey.equals(releaseKey)) {
+                // 慢持锁打点（LOCKRCA 建议A）：健康段事务持锁 ms 级，>阈值即卡顿带——自愈型
+                // 卡顿（5-12s 带内自行完成）期间无 IO、无线程活动、无错误日志，若释放点不留痕，
+                // 现场只余等待方的超时签名，持锁方是谁无从定案。快照在状态清零前取。
+                long heldMs = System.currentTimeMillis() - lockAcquireTime;
+                if (heldMs > slowHoldWarnThresholdMs) {
+                    log.warn("[MODBUS-SLOW-LOCK-HOLD] 持锁 " + heldMs + "ms 超阈值 " + slowHoldWarnThresholdMs
+                            + "ms（健康段事务持锁 ms 级，超阈值=卡顿证据）: " + lockHolderSnapshotLocked()
+                            + ", modbusInfo: " + modbusInfo);
+                }
                 currentKey = null;
                 lockAcquireTime = 0;
                 lockAcquireThread = null;
@@ -817,6 +849,43 @@ public class ModbusSource {
     /** 当前持锁 owner（观测面；null=无主/已清）。sendTraced 捕获点直读同名字段。 */
     ResourceOwner getLockAcquireOwner() {
         return lockAcquireOwner;
+    }
+
+    /**
+     * 持锁者真相快照（观测面，自取 {@code lock} 保证一致视图）：供源锁临界区外的消费方
+     * （策略层取锁失败日志）直读持锁者身份与已持时长。返回形如
+     * {@code lock currently held by: <key> (acquired at <ts> by thread <name>, held <n>ms,
+     * owner=<owner身份>)}；{@code currentKey==null} 返回 {@code lock currently free}——
+     * 该形态即「等待期间卡顿已自愈释放」的直接证据（LOCKRCA 建议A：计数区分不了两种世界）。
+     */
+    String lockHolderSnapshot() {
+        lock.lock();
+        try {
+            return lockHolderSnapshotLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * 持锁者真相快照（须在已持有 {@code lock} 的临界区内调用，无锁内自取的加锁开销）：
+     * Acquire timeout / 慢持锁打点 / 轮询弃轮三类源侧日志共用同一形态（对齐 serial 版
+     * {@code lock currently held by: ... (acquired at ... by thread ...)} 样板，补已持
+     * 时长与 owner 业务身份两字段）。
+     */
+    private String lockHolderSnapshotLocked() {
+        if (currentKey == null) {
+            return "lock currently free";
+        }
+        long heldMs = lockAcquireTime > 0 ? System.currentTimeMillis() - lockAcquireTime : -1;
+        return "lock currently held by: " + currentKey
+                + " (acquired at " + lockAcquireTime + " by thread " + lockAcquireThread
+                + ", held " + heldMs + "ms, owner=" + ownerIdentity(lockAcquireOwner) + ")";
+    }
+
+    /** owner 业务身份短串（null=无主事务；类型化/LEGACY 均以 ownerKey 全字段呈现）。 */
+    private static String ownerIdentity(ResourceOwner owner) {
+        return owner == null ? "none" : owner.ownerKey();
     }
 
     private String generateRequestKey() {
