@@ -66,7 +66,8 @@ import org.slf4j.MDC;
  *
  * <p><b>deadline</b>（专用真时钟 {@link ModbusExecutorTimers}，到点体 µs 级：complete + 投递
  * 事件）：①帧 deadline = requestTimeout×6（与策略层事务硬超时同源
- * {@code boundedReadWaitMs}）——到点异常完成本帧 + 经 IO 池卸载强拆传输（RECOVERING，
+ * {@code boundedReadWaitMs}）——到点按传输失败同形完成本帧 null + 经 IO 池卸载强拆
+ * 传输（RECOVERING，
  * 等 send 死亡后开下一帧，下一事务经 keepAlive 自愈）；这也是无锁裸帧路径的第一个
  * 挂死自愈（旧单飞形态下裸帧挂死=源永久瘫痪，无任何恢复）。②HELD hold deadline =
  * 幽灵收割阈值语义（默认 300s，可经测试缝缩短）——release 链整体丢失（持有线程被
@@ -123,7 +124,8 @@ final class ModbusConnectionExecutor {
     /**
      * 一条帧对话（dispatchIo 的排队与派发载体）：请求工厂 + 错误文案 + 结果 CF + 提交时
      * 捕获的 MDC（IO 池 worker 上恢复，per-帧日志归因与旧 drainSends 逐字同配方）。
-     * result 完成语义保持旧 dispatchIo 表面：传输异常=null；未知 RuntimeException=
+     * result 完成语义保持旧 dispatchIo 表面：传输异常=null（帧 deadline 到点同形——
+     * 自愈执法不改可观测失败契约）；未知 RuntimeException=
      * 异常完成；旁池饱和=RejectedExecutionException 异常完成。
      */
     private static final class FrameConv {
@@ -208,7 +210,7 @@ final class ModbusConnectionExecutor {
         }
     }
 
-    /** 帧 deadline 到点：异常完成本帧 + 卸载强拆 + 进入等待死亡确认（不开下一帧）。 */
+    /** 帧 deadline 到点：本帧按传输失败同形完成 null + 卸载强拆 + 进入等待死亡确认（不开下一帧）。 */
     private static final class FrameDeadline extends ExecEvent {
         final FrameConv conv;
 
@@ -339,7 +341,8 @@ final class ModbusConnectionExecutor {
 
     /**
      * 提交一条帧对话：入无界帧队列 + 唤醒执行者。失败表面由 IO 任务体保持（传输异常
-     * =null / RuntimeException=异常完成 / 旁池饱和=REE 异常完成），本方法只入队不派发。
+     * /帧 deadline 到点=null / RuntimeException=异常完成 / 旁池饱和=REE 异常完成），
+     * 本方法只入队不派发。
      */
     CompletableFuture<ModbusMessage> submitFrame(IoRequestFactory requestFactory, String errorLabel,
             Map<String, String> mdcContext) {
@@ -745,9 +748,13 @@ final class ModbusConnectionExecutor {
                 }
                 // 到点体只做 complete + 卸载强拆 + 投事件（µs 级）。强拆投递放在计时器体
                 // 而非 FrameDeadline 处理点：FrameDone（send 恰在 deadline 边界返回）与
-                // FrameDeadline 的事件序竞速不会丢强拆——挂死强证据下恢复必达且恰好一次
-                conv.result.completeExceptionally(new TimeoutException(
+                // FrameDeadline 的事件序竞速不会丢强拆——挂死强证据下恢复必达且恰好一次。
+                // 完成方式与 runFrame 传输异常路径逐字同形（log.error + null 完成）：
+                // deadline 是执行者自愈执法，不改变 SDK 既有「传输失败→null」可观测契约
+                // （设备仓判空→标故障冻结值的失败处理链对挂死帧必达，迟到但触发）
+                log.error(conv.errorLabel, new TimeoutException(
                         "Frame hard timeout after " + frameDeadlineMs + " ms"));
+                conv.result.complete(null);
                 submitRecoveryOffload(conv);
                 post(new FrameDeadline(conv));
             }, frameDeadlineMs);
@@ -780,8 +787,8 @@ final class ModbusConnectionExecutor {
     /**
      * 帧 deadline 事件：进入等待死亡确认（不开下一帧：垂死 send 可能仍有重发在途，防线上
      * 碰撞）；强拆已由计时器体卸载。send 死亡确认（FrameDone）后下一帧经
-     * keepAlive/每事务重开自愈。结果 CF 已由计时器线程异常完成——调用方不等恢复动作
-     * （与策略层超时路径同形）。
+     * keepAlive/每事务重开自愈。结果 CF 已由计时器线程按传输失败同形完成 null——调用方
+     * 不等恢复动作，失败观测与传输异常路径同面。
      */
     private void handleFrameDeadline(FrameConv conv) {
         if (frameInFlight != conv) {

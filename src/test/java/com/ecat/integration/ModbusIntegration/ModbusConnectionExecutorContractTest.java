@@ -5,16 +5,13 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -40,7 +37,8 @@ import com.serotonin.modbus4j.msg.ReadHoldingRegistersResponse;
  *       LockBusySkippedException 由 ModbusSource/策略层按 null 转换）；</li>
  *   <li>④不打断在飞：排队/授予绝不打断进行中的对话（在飞帧跑完自己的生命周期）；</li>
  *   <li>⑤HELD deadline：release 链丢失被 hold deadline 强制收场（幽灵锁收割接替）；</li>
- *   <li>⑥帧 deadline → 强拆 → 下一帧自愈（RECOVERING 等死亡确认，keepAlive 自愈语义）；</li>
+ *   <li>⑥帧 deadline → 传输失败同形 null 完成 + 强拆 → 下一帧自愈（RECOVERING 等死亡确认，
+ *       keepAlive 自愈语义）；</li>
  *   <li>⑦MDC 传播：提交点捕获、IO worker 恢复（旧 dispatchIo 配方）。</li>
  * </ul>
  * 直接构造执行者（同包），FrameRunner/RecoveryHook 注入替身——不依赖真实 master。
@@ -307,13 +305,8 @@ public class ModbusConnectionExecutorContractTest {
                 this::fakeRecover);
 
         CompletableFuture<ModbusMessage> hung = executor.submitFrame(req(), "hung", null);
-        try {
-            hung.get(5, TimeUnit.SECONDS);
-            fail("挂死帧应由 deadline 异常完成");
-        } catch (ExecutionException e) {
-            assertTrue("挂死帧应以 TimeoutException 失败，实际: " + e.getCause(),
-                    e.getCause() instanceof TimeoutException);
-        }
+        assertNull("挂死帧应由 deadline 按传输失败同形完成 null（设备侧判空失败链必达）",
+                hung.get(5, TimeUnit.SECONDS));
         // deadline 强拆（卸载恢复钩子）+ 等待死亡确认：RECOVERING 期间不开下一帧。
         // 挂死 send 得救（强拆使阻塞 IO 异常返回）→ FrameDone → RECOVERING 解除
         hangRelease.countDown();
@@ -323,6 +316,45 @@ public class ModbusConnectionExecutorContractTest {
         CompletableFuture<ModbusMessage> healed = executor.submitFrame(req(), "healed", null);
         assertNotNull("强拆后下一帧自愈（keepAlive 语义）", healed.get(5, TimeUnit.SECONDS));
         awaitWireIdle("在飞帧清零（强拆收场闭环）");
+    }
+
+    // ==================== ⑥b 帧 deadline 完成语义=传输失败同形 ====================
+
+    /**
+     * 帧 deadline 到点后调用方可见的 frame CF 完成 <b>null</b>，不是异常完成——与
+     * runFrame 传输异常路径（catch ModbusTransportException → log.error + complete(null)）
+     * 逐字同语义。deadline 的职责是执行者自愈执法（强拆/恢复），不改变 SDK 既有
+     * 「传输失败→null」契约：设备仓判空→标故障冻结值的失败处理链对挂死帧仍必达
+     * （迟到但触发，与旧无 deadline 世界同观测）。
+     */
+    @Test
+    public void frameDeadlineCompletesNullLikeTransportFailure() throws Exception {
+        CountDownLatch hangRelease = new CountDownLatch(1);
+        executor = new ModbusConnectionExecutor("ct:1502", 3, 100L, 300_000L,
+                factory -> {
+                    if (entered.incrementAndGet() == 1) {
+                        // 首帧挂死形态：阻塞 send 永不返回（deadline 是唯一救援）
+                        try {
+                            hangRelease.await();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException("hung send interrupted", e);
+                        }
+                    }
+                    return mock(ReadHoldingRegistersResponse.class);
+                },
+                this::fakeRecover);
+
+        CompletableFuture<ModbusMessage> hung = executor.submitFrame(req(), "hung", null);
+        try {
+            assertNull("deadline 到点应按传输失败同形完成 null（不是异常完成）",
+                    hung.get(5, TimeUnit.SECONDS));
+            assertFalse("完成方式必须是正常 null 完成而非异常完成", hung.isCompletedExceptionally());
+        } finally {
+            hangRelease.countDown(); // 救出挂死 send，测试收场不留阻塞 worker
+        }
+        awaitRecoveryReasons(1, "deadline 应触发传输强拆钩子（自愈目的不变）");
+        assertEquals("executor-frame-hard-timeout", recoveryReasons.get(0));
     }
 
     // ==================== ⑦MDC 传播 ====================
