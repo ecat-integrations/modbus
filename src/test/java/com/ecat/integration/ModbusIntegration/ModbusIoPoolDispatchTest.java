@@ -180,56 +180,54 @@ public class ModbusIoPoolDispatchTest {
     }
 
     /**
-     * ④池饱和快速失败：容量 1 + 排队 4（4×N）的旁池——1 线程被按住 + 4 个排队 drain 任务
-     * 占满后，新源的 send 立即以 RejectedExecutionException 异常完成（AbortPolicy——
-     * 过期即弃，不阻塞发起段）；排队内的帧不失败（突发吸收），释放后按序完成。
+     * ④池饱和快速失败：派发被拒（AbortPolicy 语义）→ 本帧立即以 RejectedExecutionException
+     * 异常完成（过期即弃），发起段零阻塞；拒绝后执行器不滞留——池重开后下一帧自愈。
+     * 执行者形态下等待帧归各连接执行者队列（零池占用），饱和的确定性缝=域池终端态
+     * （executor() 显式抛 REE，与 serial 手动缝同法——真饱和与终端态在派发点是同一异常
+     * 同一路径，无竞态）。
      * source 必须在 initialize 之后构造（旁池引用构造期捕获）。
      */
     @Test
     public void poolSaturationFailsFastWithRejection() throws Exception {
-        ModbusIoPool.initialize(1); // 1 线程 + 4 排队容量
-        CountDownLatch releaseSend = new CountDownLatch(1);
-        CountDownLatch firstStarted = new CountDownLatch(1);
-        AtomicInteger entered = new AtomicInteger();
-        when(master.send(any(ReadHoldingRegistersRequest.class))).thenAnswer(inv -> {
-            if (entered.incrementAndGet() == 1) {
-                firstStarted.countDown();
-                releaseSend.await(); // 唯一池线程被首源按住
-            }
-            return mock(ReadHoldingRegistersResponse.class);
-        });
-
-        // 首源：占住唯一线程；4 个后续源：drain 任务占满 4 个排队槽（帧未执行即排队）
+        ModbusIoPool.initialize(1);
         ModbusSource first = newSource();
-        CompletableFuture<ReadHoldingRegistersResponse> firstSend = first.readHoldingRegisters(0, 1);
-        assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
-        CompletableFuture<ReadHoldingRegistersResponse>[] queued = new CompletableFuture[4];
-        for (int i = 0; i < queued.length; i++) {
-            ModbusSource queuedSource = newSource();
-            queued[i] = queuedSource.readHoldingRegisters(2, 1);
-        }
+        ModbusSource second = newSource();
+        // 池终端态：派发点确定性 REE（executor() 显式拒绝——AbortPolicy 饱和的确定性等价缝）
+        ModbusIoPool.shutdown();
 
-        ModbusSource overflowSource = newSource();
         long startNanos = System.nanoTime();
-        CompletableFuture<ReadHoldingRegistersResponse> rejected = overflowSource.readHoldingRegisters(4, 1);
+        CompletableFuture<ReadHoldingRegistersResponse> rejected = first.readHoldingRegisters(0, 1);
         try {
             rejected.get(2, TimeUnit.SECONDS);
-            fail("池与排队全满时新 send 必须异常完成");
+            fail("池饱和时派发必须异常完成");
         } catch (ExecutionException e) {
             assertTrue("拒绝原因必须是 RejectedExecutionException，实际: " + e.getCause(),
                     e.getCause() instanceof RejectedExecutionException);
         }
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
-        assertTrue("池满拒绝必须立即（发起段零阻塞，实际 " + elapsedMs + "ms）", elapsedMs < 1_000L);
-        for (CompletableFuture<ReadHoldingRegistersResponse> q : queued) {
-            assertTrue("排队槽内的帧不得被拒绝失败（突发吸收）", !q.isCompletedExceptionally());
+        assertTrue("池满拒绝必须快速收敛（过期即弃，实际 " + elapsedMs + "ms）", elapsedMs < 1_000L);
+
+        // 第二连接同样快速失败（逐帧过期即弃，不阻塞发起段）；且后续帧继续入队派发，
+        // 执行器不因拒绝滞留
+        CompletableFuture<ReadHoldingRegistersResponse> rejectedToo = second.readHoldingRegisters(2, 1);
+        try {
+            rejectedToo.get(2, TimeUnit.SECONDS);
+            fail("饱和期第二连接派发同样必须异常完成");
+        } catch (ExecutionException e) {
+            assertTrue(e.getCause() instanceof RejectedExecutionException);
         }
 
+        // 拒绝不污染执行器状态：池重开后下一帧自愈（轮询下周期再试的语义基础）
+        ModbusIoPool.resetForTest();
+        ModbusIoPool.initialize(1);
+        CountDownLatch releaseSend = new CountDownLatch(1);
+        when(master.send(any(ReadHoldingRegistersRequest.class))).thenAnswer(inv -> {
+            releaseSend.await();
+            return mock(ReadHoldingRegistersResponse.class);
+        });
+        CompletableFuture<ReadHoldingRegistersResponse> recovered = first.readHoldingRegisters(4, 1);
         releaseSend.countDown();
-        assertTrue("释放后首帧正常完成（拒绝不污染池状态）", firstSend.get(5, TimeUnit.SECONDS) != null);
-        for (CompletableFuture<ReadHoldingRegistersResponse> q : queued) {
-            assertTrue("释放后排队帧按序完成", q.get(5, TimeUnit.SECONDS) != null);
-        }
+        assertTrue("池重开后同源派发必须自愈", recovered.get(5, TimeUnit.SECONDS) != null);
     }
 
     /**

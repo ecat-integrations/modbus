@@ -11,16 +11,17 @@ import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 
 /**
- * 【RED：Q-1/Q-2 二轮幽灵锁，与 serial SerialSourcePortGhostLockReapTest 同型】
- * release 执行链整体丢失（计时任务入队被拒/持有线程被 master.send 无界等待吸收）时
- * currentKey 成永久幽灵锁：后续 acquire 永远超时（live 实证 Acquire timeout 持续报
- * 死 key），forceRecoverTransport 只强拆传输、不清逻辑锁，恢复循环不收敛。
+ * 【连接执行者 HELD hold deadline，接替幽灵锁收割的防线语义（原与 serial
+ * SerialSourcePortGhostLockReapTest 同型）】release 执行链整体丢失（计时任务入队被拒/
+ * 持有线程被 master.send 无界等待吸收）时，旧世界 currentKey 成永久幽灵锁：后续 acquire
+ * 永远超时，恢复循环不收敛。执行者形态下无锁可泄漏：持有超阈值由执行者单线程状态机
+ * 强制收场（[MODBUS-GHOST-LOCK-REAPED] trigger=hold-deadline），连接随即恢复授予。
  *
  * <p>契约：
  * <ul>
- *   <li>持锁时长超过收割阈值 → 下一次 acquire 入口按 release 同一状态机强制清零并放行，
- *       forceRecoverTransport 同点收割；</li>
- *   <li>持锁时长未超阈值（可能仍是合法长事务）→ 不得收割。</li>
+ *   <li>持有时长超过阈值 → 执行者强制收场，下一次 acquire 立即可得，旧 key 的迟到
+ *       release 无效；</li>
+ *   <li>持有时长未超阈值（可能仍是合法长事务）→ 不得收场。</li>
  * </ul>
  */
 public class ModbusGhostLockReapTest {

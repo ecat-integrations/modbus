@@ -143,7 +143,8 @@ public class ModbusSourceTest {
         ModbusSource source = new ModbusSource(serialInfo, 2, 1000, true, false);
         TestTools.setPrivateField(source, "modbusMaster", modbusMaster);
 
-        Logger logbackLogger = (Logger) LoggerFactory.getLogger(ModbusSource.class.getName());
+        // 帧执行体（含传输异常 ERROR 日志）已随执行者化迁到连接执行者（IO worker 上跑）
+        Logger logbackLogger = (Logger) LoggerFactory.getLogger(ModbusConnectionExecutor.class.getName());
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logbackLogger.addAppender(appender);
@@ -350,9 +351,14 @@ public class ModbusSourceTest {
         assertTrue("持锁辅助线程必须在期限内取得锁", held.await(5, TimeUnit.SECONDS));
         assertNotNull("持锁 key 不应为 null", heldKey.get());
 
-        // 本线程短超时 acquire：锁忙进 waitQueue park，超时返回 null 前已自行摘除
+        // 本线程短超时 acquire：锁忙进等待队列，超时返回 null；执行者侧离队摘除与调用方
+        // 返回有 µs 级滞后（离队在执行者线程单点收敛）——等队列清空事件已发生再断言
         String busyKey = modbusSource.acquire(150, TimeUnit.MILLISECONDS);
         assertNull("锁被持有时 acquire 应超时返回 null", busyKey);
+        long drainDeadline = System.currentTimeMillis() + 5000;
+        while (modbusSource.getWaitingCount() > 0 && System.currentTimeMillis() < drainDeadline) {
+            Thread.sleep(10);
+        }
         assertEquals("超时等待者必须已从等待队列摘除（无死 key 残留）",
                 0, modbusSource.getWaitingCount());
 

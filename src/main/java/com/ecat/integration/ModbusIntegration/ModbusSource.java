@@ -43,23 +43,17 @@ import lombok.Getter;
 import com.serotonin.modbus4j.msg.ModbusMessage;
 import com.serotonin.modbus4j.sero.util.queue.ByteQueue;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import com.ecat.core.CommTrace.CommTraceBuffer;
 import com.ecat.core.CommTrace.CommTraceTransport;
 import com.ecat.core.CommTrace.OwnerLevel;
@@ -71,58 +65,18 @@ import org.slf4j.MDC;
 
 public class ModbusSource {
     private final Log log = LogFactory.getLogger(getClass());
-    private final Lock lock = new ReentrantLock();
-    private final Condition condition = lock.newCondition();
     @Getter
     private final int maxWaiters; // 最大等待请求数
     @Getter
     private final int waitTimeoutMs; // 等待超时时间（毫秒）
-    private String currentKey;    // 当前持有锁的key
-    private volatile long lockAcquireTime;   // 持锁时刻（幽灵锁收割判据）
-    private volatile String lockAcquireThread; // 持锁线程名（幽灵锁收割日志定位）
-    // 当前持锁事务的注册 owner（io-resource-owner §5.3 锁）：授予点登记、release 与幽灵锁
-    // 收割按同一状态机清除；sendTraced 捕获点以此作 TX/RX 权威归因（owner 在=整组投影，
-    // 不与线程 MDC 混搭）。null=无锁路径或 LEGACY 注册——此时捕获点按 frameAttributionOwner()
-    // 落源注册兜底（坐标级投影），无类型化注册者才维持 MDC 归因现状。
-    private volatile ResourceOwner lockAcquireOwner;
-    private final Queue<String> waitQueue = new LinkedList<>(); // 等待队列（保存请求标识）
 
     /**
-     * 幽灵锁收割阈值：currentKey 持续超过该时长即判定持锁事务已死（release 永久缺失），
-     * 强制清锁救活源。合法事务的硬超时上限 = requestTimeout×6（boundedReadWaitMs），
-     * 秒级~十秒级，5 分钟远超任何合法持锁时长。package-private 非 final 供红测缩短。
+     * 幽灵收割阈值语义（现役形态=连接执行者的 HELD hold deadline）：release 链整体丢失
+     * （持有线程被 master.send 无界吸收等）时强制收场，防连接锁死。合法事务的硬超时
+     * 上限 = requestTimeout×6（boundedReadWaitMs），秒级~十秒级，5 分钟远超任何合法
+     * 持锁时长。package-private 非 final 供红测缩短。
      */
     static final long DEFAULT_GHOST_REAP_THRESHOLD_MS = 300_000L;
-    private long ghostReapThresholdMs = DEFAULT_GHOST_REAP_THRESHOLD_MS;
-
-    /**
-     * 红测注入口：缩短幽灵锁收割阈值（仅同包测试使用；生产用默认 5 分钟）。
-     */
-    void setGhostReapThresholdMsForTest(long thresholdMs) {
-        if (thresholdMs <= 0) {
-            throw new IllegalArgumentException("ghostReapThresholdMs must be > 0, got: " + thresholdMs);
-        }
-        this.ghostReapThresholdMs = thresholdMs;
-    }
-
-    /**
-     * 慢持锁打点阈值：健康段事务持锁 ms 级（sim RTT 0.12~1.13ms 量纲），>1s 即进入卡顿带
-     * （5-12s 自愈带下缘之下）。自愈型卡顿无任何错误日志、12s 硬超时与 300s 幽灵收割都
-     * 不会触发，release 点必须留一行痕迹（持锁方身份+时长），否则偶发现场只余等待方的
-     * 超时签名，持锁方是谁无从定案（LOCKRCA 建议A 可观测性）。
-     */
-    static final long DEFAULT_SLOW_HOLD_WARN_THRESHOLD_MS = 1_000L;
-    private long slowHoldWarnThresholdMs = DEFAULT_SLOW_HOLD_WARN_THRESHOLD_MS;
-
-    /**
-     * 红测注入口：缩短慢持锁打点阈值（仅同包测试使用；生产用默认 1 秒）。
-     */
-    void setSlowHoldWarnThresholdMsForTest(long thresholdMs) {
-        if (thresholdMs <= 0) {
-            throw new IllegalArgumentException("slowHoldWarnThresholdMs must be > 0, got: " + thresholdMs);
-        }
-        this.slowHoldWarnThresholdMs = thresholdMs;
-    }
     // 通讯帧捕获事务配对序号（TX/RX 同 txnId）
     private static final AtomicLong TXN_COUNTER = new AtomicLong(0);
 
@@ -142,13 +96,11 @@ public class ModbusSource {
     // 不再被逐事务钉死（084500 风暴族根除形态）。池归 ModbusIntegration 生命周期管理
     // （onInit 初始化/onRelease 关停）；无集成上下文（单测/独立运行）由 ModbusIoPool 惰性建默认池。
     private final ExecutorService ioExecutor;
-    // 同源待发队列（R3 期 4，提交面串行）：同源（=同连接）的帧 FIFO 逐帧消费、同一时刻至多
-    // 占一个旁池线程（单飞 drain，见 dispatchIo）。等待中的帧是纯 Java 对象——排队零线程消耗
-    // （区别于「池内等信号量」形态：事务内并行段不放大池占用）。guarded by this。
-    private final ArrayDeque<PendingSend> pendingSends = new ArrayDeque<>();
-    // 本源单飞标志：true=已有 drain 任务在旁池消费本源队列（dispatch 与 drain 在 this 锁下
-    // 交接，无丢失唤醒）。guarded by this。
-    private boolean sendDraining = false;
+    // 每连接串行执行者（serial 4.1.0 SerialPortExecutor 同模式、连接域独立实现）：
+    // 总线互斥（HELD 有界优先队列）、帧序（无界 FIFO 单在飞）、事务/帧 deadline 全部
+    // 收敛到单线程状态机——取代旧 ReentrantLock+waitQueue+currentKey+幽灵收割+pendingSends
+    // 手写单飞九件套（无锁可泄漏、无幽灵可收割，机制细节见执行者类注）。
+    private final ModbusConnectionExecutor connectionExecutor;
     // 死源显式标志（destroyResources 置位）：isModbusOpen 的死源防线。
     private volatile boolean destroyed;
 
@@ -164,20 +116,46 @@ public class ModbusSource {
      * 构造函数
      *
      * @param modbusInfo    Modbus 设备信息
-     * @param maxWaiters    最大等待请求数
+     * @param maxWaiters    最大等待请求数（连接执行者 HELD 队列容量）
      * @param waitTimeoutMs 等待超时时间（毫秒）
      * @param skipOpen      是否跳过 openModbus()（RTU 新模式跳过，由 initSerialMaster 初始化）
      * @param delegateMode  是否为委托模式（DeviceSpecificModbusSource 使用；send 委托共享源执行，
-     *                      本实例的旁池引用不参与其事务路径）
+     *                      本实例的旁池引用与执行者不参与其事务路径）
      */
     protected ModbusSource(ModbusInfo modbusInfo, int maxWaiters, int waitTimeoutMs, boolean skipOpen, boolean delegateMode) {
         this.maxWaiters = maxWaiters; // 设置资源最大等待请求数
         this.waitTimeoutMs = waitTimeoutMs; // 设置资源等待超时时间
         this.modbusInfo = modbusInfo;
         this.ioExecutor = ModbusIoPool.executor();
+        // 帧 deadline 与策略层事务硬超时同源（boundedReadWaitMs）：requestTimeout×6，
+        // 覆盖 modbus4j send 的 timeout×(retries+1) 上界再留余量；非法值不武装（同守卫）。
+        // 委托视图（DeviceSpecificModbusSource 经 mock delegate 构造等）modbusInfo 可为
+        // null——该形态不参与本实例事务路径，执行者仅作占位（connectionKey 用明示标签）。
+        long frameDeadlineMs = modbusInfo != null && modbusInfo.getRequestTimeoutMs() > 0
+                ? (long) modbusInfo.getRequestTimeoutMs() * ModbusTransactionStrategy.BOUNDED_READ_WAIT_FACTOR
+                : 0L;
+        this.connectionExecutor = new ModbusConnectionExecutor(
+                modbusInfo != null ? connectionKey(modbusInfo) : "delegate-view", maxWaiters, frameDeadlineMs,
+                DEFAULT_GHOST_REAP_THRESHOLD_MS,
+                factory -> sendTraced(factory.create()), this::forceRecoverTransport);
         if (!skipOpen) {
             openModbus();
         }
+    }
+
+    /**
+     * 连接仲裁键（执行者线程名与日志定位用）：与 {@code ModbusIntegration.getConnectionIdentity}
+     * 同口径——TCP ip:port / 串口 portName。未知类型无法建立连接，抛明示而非猜测。
+     */
+    private static String connectionKey(ModbusInfo info) {
+        if (info instanceof ModbusTcpInfo) {
+            ModbusTcpInfo tcp = (ModbusTcpInfo) info;
+            return tcp.getIpAddress() + ":" + tcp.getPort();
+        }
+        if (info instanceof ModbusSerialInfo) {
+            return ((ModbusSerialInfo) info).getPortName();
+        }
+        throw new IllegalStateException("未知的Modbus协议类型: " + info.getClass().getName());
     }
 
     /**
@@ -220,10 +198,11 @@ public class ModbusSource {
         }
         String txnId = "mb-" + TXN_COUNTER.incrementAndGet();
         long startNanos = System.nanoTime();
-        // 捕获点权威归因（io-resource-owner §5.3）：帧归属=当前持锁 owner（modbus 事务恒在
-        // 锁内发起，同连接多 slave 逐笔归属）；无锁/LEGACY 时落源注册兜底（见
-        // frameAttributionOwner——归因次序 owner > MDC > 回填在 CommTraceBuffer 仍成立）。
-        // 单次取值冻结 TX/RX 同帧同主（事务硬超时清锁不撕裂同一对的归因）。
+        // 捕获点权威归因（io-resource-owner §5.3）：帧归属=当前 HELD 持有 owner（modbus
+        // 事务恒在持有期发起，同连接多 slave 逐笔归属；执行者授予点登记）；无持有/LEGACY
+        // 时落源注册兜底（见 frameAttributionOwner——归因次序 owner > MDC > 回填在
+        // CommTraceBuffer 仍成立）。单次取值冻结 TX/RX 同帧同主（持有超时清槽不撕裂同一对
+        // 的归因）。
         ResourceOwner frameOwner = frameAttributionOwner();
         CommTraceBuffer.instance().tx(transport, portId, encodeMessage(request), txnId, frameOwner);
         try {
@@ -239,10 +218,10 @@ public class ModbusSource {
     }
 
     /**
-     * 本帧权威 owner（归因次序：持锁 owner &gt; 源注册兜底 &gt; null 落线程 MDC）。
+     * 本帧权威 owner（归因次序：持槽 owner &gt; 源注册兜底 &gt; null 落线程 MDC）。
      *
      * <p>无锁兜底（bug-record-20260913-111500）：裸 dispatchIo 读事务（mgd 轮询形态）
-     * 不经源锁，lockAcquireOwner 恒 null，帧归因此前只剩提交线程 MDC——RECONFIGURE
+     * 不经源锁，持槽 owner 恒 null，帧归因此前只剩提交线程 MDC——RECONFIGURE
      * 热加载在 REST 线程重新调度轮询后 MDC 快照丢 coordinate，帧变无主。兜底取本源
      * 注册账本首个类型化注册者，投影成<b>坐标级</b> owner：无锁路径本无逐笔身份，
      * 注册者层级无论 ENTRY/DEVICE 一律折到坐标（不引入 MDC 时代不存在的设备维度；
@@ -254,8 +233,9 @@ public class ModbusSource {
      * 无坐标字段，注入反而压制 MDC 归因，与锁通道同判定）。
      */
     private ResourceOwner frameAttributionOwner() {
-        if (lockAcquireOwner != null) {
-            return lockAcquireOwner;
+        ResourceOwner heldOwner = connectionExecutor.currentOwner();
+        if (heldOwner != null) {
+            return heldOwner;
         }
         for (ResourceOwner owner : registeredOwners.values()) {
             if (owner.getLevel() != OwnerLevel.LEGACY) {
@@ -356,139 +336,31 @@ public class ModbusSource {
                         ", modbusInfo=" + modbusInfo + ")");
     }
 
-    /** 单帧 IO 请求构造器（在旁池线程上执行）：modbus4j 请求构造可抛 ModbusTransportException（非法 slaveId/越界地址）。 */
-    @FunctionalInterface
-    private interface IoRequestFactory {
-        ModbusRequest create() throws ModbusTransportException;
-    }
-
     /**
-     * 同源单条待发帧（R3 期 4）：请求工厂 + 错误文案 + 结果 CF + 提交时捕获的 MDC
-     * （旁池线程上恢复，per-send 日志归因与旧 supplyAsync 任务粒度一致）。
-     */
-    private static final class PendingSend {
-        final IoRequestFactory requestFactory;
-        final String errorLabel;
-        final Map<String, String> mdcContext;
-        final CompletableFuture<ModbusMessage> result = new CompletableFuture<>();
-
-        PendingSend(IoRequestFactory requestFactory, String errorLabel, Map<String, String> mdcContext) {
-            this.requestFactory = requestFactory;
-            this.errorLabel = errorLabel;
-            this.mdcContext = mdcContext;
-        }
-    }
-
-    /**
-     * 把单次阻塞 master.send（含写+等回音）派发到 modbus IO 旁池执行（R3 期 4，15 号 §6.4）。
+     * 把单次阻塞 master.send（含写+等回音）的帧对话提交给连接执行者（serial 模式）。
      *
-     * <p>发起段 O(1)：入本源待发队即返回 CF，阻塞消耗由 {@code ecat-modbus-io-N} 线程承接——
-     * 引擎 lane worker 不再被响应窗钉死（发起即返；jstack 断言：ecat-sched-worker 无
-     * master.send 栈）。
+     * <p>发起段 O(1)：入本连接无界帧队列即返回 CF——执行者按「同刻至多一帧在飞」派发，
+     * 阻塞 send 在 {@code ecat-modbus-io-N} 旁池 worker 承接（引擎 lane worker 不被响应窗
+     * 钉死；执行者线程只排序不执行 send）。帧序与互斥由执行者单线程状态机保证
+     * （取代旧 pendingSends+sendDraining 手写单飞；等待帧是纯 Java 对象，排队零线程消耗）。
      *
-     * <p><b>同源单飞（提交面串行）</b>：同源（=同 TCP 连接/同 RS485 总线，DeviceSpecific
-     * 委托共享源）的帧在本源 FIFO 队列按序消费，同一时刻至多占一个旁池线程——防帧碰撞
-     * （modbus4j RtuMaster.sendImpl 无方法级同步，TcpMaster 的 synchronized sendImpl 只是
-     * 实现细节，均不得作正确性依赖），且事务内并行段（saimosen allOf 四段读、tyxdgroup
-     * thenCombine 双读这类「急切多读」形态）不放大池占用（live 实证：信号量在池内等许可
-     * 的形态令 saimosen 单事务占 4 线程、9 源即饱和 16 线程池——本形态为修订定稿）。
-     * 跨事务互斥仍由源锁保证（轮询经 acquirePollingBounded 有界等待，预算耗尽才弃轮）。
-     *
-     * <p>失败表面不变：请求构造/传输异常（ModbusTransportException，构造与 send 同域——
-     * 原「写在调用线程构造、读在池内构造」两形态统一）→ CF 完成值 null（调用方 null 语义
-     * 不变）；未知 RuntimeException → CF 异常完成如实上抛。旁池饱和拒绝（线程+有界队全满）
-     * → 本源全部待发帧 CF 立即异常完成（RejectedExecutionException）——事务级「过期即弃」：
+     * <p>失败表面不变：请求构造/传输异常（ModbusTransportException）→ CF 完成值 null
+     * （调用方 null 语义不变）；未知 RuntimeException → CF 异常完成如实上抛；旁池饱和
+     * 拒绝 → 本帧 CF 立即异常完成（RejectedExecutionException）——事务级「过期即弃」：
      * 轮询本周期放弃下周期再试 / 写闸记 FAILED，不阻塞发起段。
      *
      * @param requestFactory 单帧请求构造（旁池线程上执行）
      * @param errorLabel     传输异常时的 ERROR 日志文案（含 slaveId/modbusInfo 定位信息）
      * @return 响应 CF：成功=响应对象；传输异常=null；池饱和=RejectedExecutionException 异常完成
      */
+    private <R extends ModbusMessage> CompletableFuture<R> dispatchIo(ModbusConnectionExecutor.IoRequestFactory requestFactory, String errorLabel) {
+        return cast(connectionExecutor.submitFrame(requestFactory, errorLabel, MDC.getCopyOfContextMap()));
+    }
+
+    /** 泛型投影（执行者 CF 按 ModbusMessage 完成，调用方按具体响应类型消费——旧形态不变）。 */
     @SuppressWarnings("unchecked")
-    private <R extends ModbusMessage> CompletableFuture<R> dispatchIo(IoRequestFactory requestFactory, String errorLabel) {
-        PendingSend send = new PendingSend(requestFactory, errorLabel, MDC.getCopyOfContextMap());
-        boolean submitDrain = false;
-        synchronized (this) {
-            pendingSends.addLast(send);
-            if (!sendDraining) {
-                sendDraining = true;
-                submitDrain = true;
-            }
-        }
-        if (submitDrain) {
-            submitSendDrain();
-        }
-        return (CompletableFuture<R>) (CompletableFuture<?>) send.result;
-    }
-
-    /**
-     * 提交「消费本源待发队列」任务到旁池。池饱和（AbortPolicy）→ 本源全部待发帧立即
-     * 异常完成并复位单飞标志（下一事务的首次派发重新尝试提交，源可自愈）。
-     */
-    private void submitSendDrain() {
-        try {
-            ioExecutor.execute(this::drainSends);
-        } catch (RejectedExecutionException poolSaturated) {
-            failAllPendingSends(poolSaturated);
-        }
-    }
-
-    /**
-     * 消费本源待发队列（旁池线程）：逐帧构造请求→sendTraced→完成 CF。持有单飞标志直到
-     * 队列空（期间新入队帧被本循环直接消费，不再占新池任务）。每帧恢复其提交时 MDC，
-     * CF 的同步依赖（解析/属性更新链）在该帧自己的 MDC 下执行。
-     */
-    private void drainSends() {
-        for (;;) {
-            PendingSend send;
-            synchronized (this) {
-                send = pendingSends.pollFirst();
-                if (send == null) {
-                    sendDraining = false;
-                    return;
-                }
-            }
-            Map<String, String> previousMdc = MDC.getCopyOfContextMap();
-            try {
-                if (send.mdcContext != null) {
-                    MDC.setContextMap(send.mdcContext);
-                }
-                send.result.complete(sendTraced(send.requestFactory.create()));
-            } catch (ModbusTransportException e) {
-                log.error(send.errorLabel, e);
-                send.result.complete(null);
-            } catch (RuntimeException e) {
-                // 未知异常如实异常完成（严格模式：不吞不换 null 掩盖）
-                send.result.completeExceptionally(e);
-            } finally {
-                if (send.mdcContext != null) {
-                    if (previousMdc != null) {
-                        MDC.setContextMap(previousMdc);
-                    } else {
-                        MDC.clear();
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * 池饱和时失败本源全部待发帧（过期即弃）：逐帧异常完成（RejectedExecutionException），
-     * 清队并复位单飞标志（锁内快照、锁外完成，避免 CF 依赖链在持锁下执行）。
-     */
-    private void failAllPendingSends(RejectedExecutionException cause) {
-        List<PendingSend> drained = new ArrayList<>();
-        synchronized (this) {
-            PendingSend send;
-            while ((send = pendingSends.pollFirst()) != null) {
-                drained.add(send);
-            }
-            sendDraining = false;
-        }
-        for (PendingSend send : drained) {
-            log.warn("Modbus IO 旁池饱和，本帧立即失败（过期即弃，轮询下周期再试）: " + send.errorLabel);
-            send.result.completeExceptionally(cause);
-        }
+    private static <R extends ModbusMessage> CompletableFuture<R> cast(CompletableFuture<? extends ModbusMessage> future) {
+        return (CompletableFuture<R>) future;
     }
 
     public CompletableFuture<ReadCoilsResponse> readCoils(int startAddress, int numberOfBits) {
@@ -582,7 +454,7 @@ public class ModbusSource {
     }
 
     /**
-     * 尝试获取锁，支持等待队列
+     * 尝试获取连接事务槽（HELD），支持等待队列
      * @return 锁标识（成功获取或进入等待），null表示无法获取且超出等待队列容量
      */
     public String acquire() {
@@ -590,10 +462,10 @@ public class ModbusSource {
     }
 
     /**
-     * 带注册 owner 获取锁（io-resource-owner §5.3 锁）：授予点把 owner 登记为
-     * {@code lockAcquireOwner}（事务期间 TX/RX 捕获点的权威归因来源），
-     * release/幽灵锁收割与 key 同一状态机清除。LEGACY owner 请传 null——LEGACY 无设备
-     * 身份字段，注入反而会压制线程 MDC 归因（过渡期行为不得回退）。
+     * 带注册 owner 获取连接事务槽（io-resource-owner §5.3 锁）：授予点把 owner 登记
+     * 为持有者（事务期间 TX/RX 捕获点的权威归因来源），release 与持有超时强制收场按
+     * 同一状态机清除。LEGACY owner 请传 null——LEGACY 无设备身份字段，注入反而会压制
+     * 线程 MDC 归因（过渡期行为不得回退）。
      *
      * @param owner 本次事务的注册 owner（null=无主事务，保持现状）
      * @return 锁标识（成功获取或进入等待），null表示无法获取且超出等待队列容量
@@ -603,19 +475,19 @@ public class ModbusSource {
     }
 
     /**
-     * 尝试获取锁，支持等待队列和超时
+     * 尝试获取连接事务槽，支持等待队列和超时
      * @param timeout 超时时间
      * @param unit 时间单位
      * @return 锁标识（成功获取/唤醒或进入等待），null表示超时、超出等待队列容量，
-     *         或唤醒后锁已被快速路径请求抢占（handed-off race 失败，按未取得总线重试）
+     *         或被高优先级请求挤出
      */
     public String acquire(long timeout, TimeUnit unit) {
         return acquire(timeout, unit, null);
     }
 
     /**
-     * 锁获取核心（owner 登记版）：两处授予点（快速路径 / 队头交接）均登记
-     * {@code lockAcquireOwner}，与 currentKey 同生共死。
+     * 事务槽获取核心（owner 登记版）：委托连接执行者——无竞争快路径内联授予（调用
+     * 线程，与旧快速路径同形态），有竞争入有界优先队列并阻塞等待授予回执。
      *
      * @param timeout 超时时间
      * @param unit 时间单位
@@ -623,74 +495,12 @@ public class ModbusSource {
      * @return 锁标识；语义同 {@link #acquire(long, TimeUnit)}
      */
     public String acquire(long timeout, TimeUnit unit, ResourceOwner owner) {
-        String requestKey = generateRequestKey(); // 生成唯一请求标识
-        lock.lock();
-        try {
-            reapGhostLockIfStale("acquire");
-            if (currentKey == null) {
-                // 直接获取锁
-                currentKey = requestKey;
-                lockAcquireTime = System.currentTimeMillis();
-                lockAcquireThread = Thread.currentThread().getName();
-                lockAcquireOwner = owner;
-                return requestKey;
-            } else {
-                // 检查等待队列是否未满
-                if (waitQueue.size() < maxWaiters) {
-                    waitQueue.add(requestKey);
-                    boolean isAwoken = false;
-                    try {
-                        // 等待唤醒或超时
-                        isAwoken = condition.await(timeout, unit);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt(); // 恢复中断状态
-                        log.error( "Wait interrupted: " + requestKey + ", modbusInfo: " + modbusInfo.toString(), e);
-                        waitQueue.remove(requestKey); // 从队列移除
-                        return null;
-                    }
-
-                    if (isAwoken) {
-                        // 接管锁必须同时满足：自己是队头 且 锁确实空闲（currentKey==null 复查不可省：
-                        // release() 发出 signal 之后、等待者重入临界区之前，另一请求可经快速路径
-                        // （currentKey==null 分支）抢先持有；若仍执行 currentKey = requestKey 会无声
-                        // 覆盖其持有权，两个 key 同时自认持锁，共享连接/RS485 总线上并发收发即帧碰撞）
-                        if (currentKey == null && waitQueue.peek() != null && waitQueue.peek().equals(requestKey)) {
-                            currentKey = requestKey;
-                            lockAcquireTime = System.currentTimeMillis();
-                            lockAcquireThread = Thread.currentThread().getName();
-                            lockAcquireOwner = owner;
-                            waitQueue.poll();
-                            return requestKey;
-                        }
-                        // 队头不是自己（队列变更，skip），或锁已被快速路径抢占：返回 null 前必须摘除
-                        // 自身 key。若残留队头即成死 key——此后每次 signal 唤醒的等待者都因队头不匹配
-                        // 被错误拒绝并同样泄漏，队列只增不减直至 maxWaiters 名额被尸体耗尽。
-                        waitQueue.remove(requestKey);
-                        return null;
-                    } else {
-                        // 超时处理
-                        waitQueue.remove(requestKey); // 从队列移除超时请求
-                        // 持锁者真相（LOCKRCA 建议A，对齐 serial 版 Acquire timeout 样板）：
-                        // 完整等待预算内零 release 只能是持锁事务卡顿，超时行必须能直读持锁者
-                        // 身份（key/线程/owner）+已持时长+剩余等待者数，否则偶发卡顿现场
-                        // （容器日志随容器销毁）不可回溯即失证。本行在 lock 临界区内，快照无撕裂。
-                        log.error("Acquire timeout: " + requestKey + ", modbusInfo: " + modbusInfo.toString()
-                                + ", " + lockHolderSnapshotLocked() + ", waiters=" + waitQueue.size());
-                        return null;
-                    }
-                } else {
-                    log.warn( "Max waiters exceeded, request rejected: " + requestKey);
-                    return null; // 超出最大等待数，直接返回不可用
-                }
-            }
-        } finally {
-            lock.unlock();
-        }
+        return connectionExecutor.acquire(owner, unit.toMillis(timeout));
     }
 
     /** 轮询真弃轮计数（E2/R3 记账：有界等待预算耗尽才计，禁静默）。 */
     private final AtomicLong lockBusySkipCount = new AtomicLong();
-    /** 锁忙放弃日志限频时间戳（锁临界区内读写，ReentrantLock 保证可见性，仅日志用）。 */
+    /** 锁忙放弃日志限频时间戳（volatile；竞速重复写仅可能多打一条限频内 warn，无语义影响）。 */
     private volatile long lastBusySkipLogAt;
     /** 锁忙放弃日志限频间隔：默认 60s 一条（饱和期 ~30 次/min 的放弃若不限频会刷爆日志）。 */
     static final long BUSY_SKIP_LOG_INTERVAL_MS = 60_000L;
@@ -701,14 +511,15 @@ public class ModbusSource {
     }
 
     /**
-     * 轮询锁获取契约（20260913-073600 修复，方案 c：轮询并入 FIFO 有界等待）：无竞争
-     * 快路径直达；锁忙时把 FIFO 有界等待移交 IO 旁池线程执行——调用线程（SDK 定时线程）
-     * 零 park，轮询重新与写命令同队同公平（deed33d 把轮询踢出等待队列是共享口相位锁定
-     * 饥饿的根因）。
+     * 轮询锁获取契约（20260913-073600 修复，方案 c：轮询并入 FIFO 有界等待——执行者
+     * 形态下排队与授予由连接执行者承载）：无竞争快路径直达（授予在调用线程完成，
+     * 事务体随 CF 依赖链在调用线程执行）；锁忙时排队等待由执行者线程承载（提交线程
+     * 零 park），授予回执经 {@code thenAcceptAsync} 卸载 IO 旁池线程——事务体在旁池
+     * 线程执行（MDC 已恢复到提交时快照），执行者线程永不跑设备代码。轮询与写命令同队
+     * 同公平（高挤普通的被挤方=轮询方，语义见执行者 admit）。
      *
-     * <p>返回 CF 语义：完成值非 null=锁标识（等待授予发生在旁池线程，事务体随 CF 依赖链
-     * 在同一旁池线程执行，MDC 已恢复到提交时快照）；null=本周期真弃轮（预算耗尽/等待
-     * 队列满/旁池饱和拒绝），源侧记账。等到了锁的轮次不计入
+     * <p>返回 CF 语义：完成值非 null=锁标识；null=本周期真弃轮（预算耗尽/等待
+     * 队列满/被高优先级挤出/旁池饱和拒绝），源侧记账。等到了锁的轮次不计入
      * {@link #getLockBusySkipCount()}（观测不说谎）。
      *
      * @param budgetMs 锁等待预算（毫秒，须 &gt; 0；SDK 侧按轮询周期 clamp）
@@ -719,36 +530,38 @@ public class ModbusSource {
     }
 
     /**
-     * 带注册 owner 的轮询锁获取（io-resource-owner §5.3 锁）：授予点登记
-     * {@code lockAcquireOwner}（快路径与队头交接两处，语义同
-     * {@link #acquire(long, TimeUnit, ResourceOwner)}）；LEGACY 传 null。包内可见：
-     * 消费面是 {@code ModbusTransactionStrategy} 与 {@code DeviceSpecificModbusSource}
-     * 的 owner 注入委托，不对集成开放。
+     * 带注册 owner 的轮询锁获取（io-resource-owner §5.3 锁）：授予点登记持有 owner
+     * （快路径与队列授予两处，语义同 {@link #acquire(long, TimeUnit, ResourceOwner)}）；
+     * LEGACY 传 null。包内可见：消费面是 {@code ModbusTransactionStrategy} 与
+     * {@code DeviceSpecificModbusSource} 的 owner 注入委托，不对集成开放。
      */
     CompletableFuture<String> acquirePollingBounded(ResourceOwner owner, long budgetMs) {
         if (budgetMs <= 0) {
             throw new IllegalArgumentException("acquirePollingBounded 要求 budgetMs > 0: " + budgetMs);
         }
-        // 快路径：无竞争轮次零等待、零记账（与旧轮询契约的非阻塞授予段行为一致）
-        String fast = acquireUncontended(owner);
-        if (fast != null) {
-            return CompletableFuture.completedFuture(fast);
+        // 排队授予（快路径内联授予的 conv.granted 已完成，thenAcceptAsync 同步执行在
+        // 调用线程——与旧「快路径事务体在调用线程执行」形态一致；慢路径完成点在 IO
+        // 旁池线程，MDC 恢复到提交时快照，帧捕获携带设备归属）
+        CompletableFuture<String> granted = connectionExecutor.acquireAsync(owner, budgetMs);
+        if (granted == null) {
+            // 队满且无可挤（满拒）：本周期真弃轮，记账后按 null 完成（策略层转跳过异常）
+            recordPollingSkip(budgetMs);
+            return CompletableFuture.completedFuture(null);
         }
-        // 锁忙：等待移交 IO 旁池线程（定时线程零 park），预算内经 acquire 排队等队头交接。
-        // MDC 提交时捕获、旁池任务内恢复——完成点之后的依赖链（事务体→dispatchIo 帧捕获）
-        // 在旁池线程上携带设备归属上下文，与快路径的定时线程形态归因一致。
+        if (granted.isDone()) {
+            return granted; // 快路径：授予已在提交线程完成，事务体在调用线程执行（零 hop）
+        }
         Map<String, String> mdcContext = MDC.getCopyOfContextMap();
         CompletableFuture<String> out = new CompletableFuture<>();
         try {
-            ioExecutor.execute(() -> {
+            granted.thenAcceptAsync(key -> {
                 Map<String, String> previousMdc = MDC.getCopyOfContextMap();
                 try {
                     if (mdcContext != null) {
                         MDC.setContextMap(mdcContext);
                     }
-                    String key = acquire(budgetMs, TimeUnit.MILLISECONDS, owner);
                     if (key == null) {
-                        // 真弃轮才记账：预算耗尽/队列满（等到锁的轮次不计，观测不说谎）
+                        // 真弃轮才记账：预算耗尽/被挤出（等到锁的轮次不计，观测不说谎）
                         recordPollingSkip(budgetMs);
                     }
                     out.complete(key);
@@ -761,7 +574,7 @@ public class ModbusSource {
                         }
                     }
                 }
-            });
+            }, ioExecutor);
         } catch (RejectedExecutionException poolSaturated) {
             // 旁池饱和（线程+有界队全满）：本周期弃轮，下一周期再试（源可自愈）
             recordPollingSkip(budgetMs);
@@ -771,157 +584,52 @@ public class ModbusSource {
     }
 
     /**
-     * 无竞争快路径取锁（旧轮询契约的授予段）：锁忙返回 null，等待/弃轮由调用方
-     * 决定——是否真弃轮取决于等待结果，记账不在此处。
-     */
-    private String acquireUncontended(ResourceOwner owner) {
-        String requestKey = generateRequestKey();
-        lock.lock();
-        try {
-            reapGhostLockIfStale("acquire");
-            if (currentKey == null) {
-                currentKey = requestKey;
-                lockAcquireTime = System.currentTimeMillis();
-                lockAcquireThread = Thread.currentThread().getName();
-                lockAcquireOwner = owner;
-                return requestKey;
-            }
-            return null;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /**
      * 真弃轮记账（E2/R3 可观测性：放弃必须可计数，禁静默）：计数 + 限频 warn。
-     * 持锁方快照在锁内取，避免读到撕裂的 currentKey/时间戳组合。
+     * 持有者快照经执行者观测面直读（单写者+授予后字段稳定，无撕裂）。
      */
     private void recordPollingSkip(long budgetMs) {
         long skips = lockBusySkipCount.incrementAndGet();
-        lock.lock();
-        try {
-            long now = System.currentTimeMillis();
-            if (now - lastBusySkipLogAt >= BUSY_SKIP_LOG_INTERVAL_MS) {
-                lastBusySkipLogAt = now;
-                log.warn("Polling bounded-acquire budget exhausted (" + budgetMs + "ms): modbusInfo=" + modbusInfo
-                        + ", total skips=" + skips + ", " + lockHolderSnapshotLocked());
-            }
-        } finally {
-            lock.unlock();
+        long now = System.currentTimeMillis();
+        if (now - lastBusySkipLogAt >= BUSY_SKIP_LOG_INTERVAL_MS) {
+            lastBusySkipLogAt = now;
+            log.warn("Polling bounded-acquire budget exhausted (" + budgetMs + "ms): modbusInfo=" + modbusInfo
+                    + ", total skips=" + skips + ", " + connectionExecutor.lockHolderSnapshot());
         }
     }
 
     /**
-     * 释放锁
+     * 释放连接事务槽
      * @param releaseKey 要释放的锁标识
-     * @return 释放是否成功
+     * @return 释放是否成功（false=key 不匹配——含持有超时已被强制收场的竞速）
      */
     public boolean release(String releaseKey) {
-        lock.lock();
-        try {
-            if (currentKey != null && currentKey.equals(releaseKey)) {
-                // 慢持锁打点（LOCKRCA 建议A）：健康段事务持锁 ms 级，>阈值即卡顿带——自愈型
-                // 卡顿（5-12s 带内自行完成）期间无 IO、无线程活动、无错误日志，若释放点不留痕，
-                // 现场只余等待方的超时签名，持锁方是谁无从定案。快照在状态清零前取。
-                long heldMs = System.currentTimeMillis() - lockAcquireTime;
-                if (heldMs > slowHoldWarnThresholdMs) {
-                    log.warn("[MODBUS-SLOW-LOCK-HOLD] 持锁 " + heldMs + "ms 超阈值 " + slowHoldWarnThresholdMs
-                            + "ms（健康段事务持锁 ms 级，超阈值=卡顿证据）: " + lockHolderSnapshotLocked()
-                            + ", modbusInfo: " + modbusInfo);
-                }
-                currentKey = null;
-                lockAcquireTime = 0;
-                lockAcquireThread = null;
-                lockAcquireOwner = null;
-                // 唤醒下一个等待的请求
-                if (!waitQueue.isEmpty()) {
-                    condition.signal(); // 唤醒等待队列中的第一个线程
-                }
-                return true;
-            }
-            log.warn( "Invalid release key: " + releaseKey);
-            return false;
-        } finally {
-            lock.unlock();
-        }
+        return connectionExecutor.release(releaseKey);
     }
 
-    /** 当前持锁 owner（观测面；null=无主/已清）。sendTraced 捕获点直读同名字段。 */
+    /** 当前持有 owner（观测面；null=无主/已清）。sendTraced 捕获点直读同语义值。 */
     ResourceOwner getLockAcquireOwner() {
-        return lockAcquireOwner;
+        return connectionExecutor.currentOwner();
     }
 
     /**
-     * 持锁者真相快照（观测面，自取 {@code lock} 保证一致视图）：供源锁临界区外的消费方
-     * （策略层取锁失败日志）直读持锁者身份与已持时长。返回形如
-     * {@code lock currently held by: <key> (acquired at <ts> by thread <name>, held <n>ms,
-     * owner=<owner身份>)}；{@code currentKey==null} 返回 {@code lock currently free}——
-     * 该形态即「等待期间卡顿已自愈释放」的直接证据（LOCKRCA 建议A：计数区分不了两种世界）。
+     * 持有者真相快照（观测面）：供源锁语义的消费方（策略层取锁失败日志）直读持有者
+     * 身份与已持时长。形态与旧锁版本逐字一致（{@code lock currently held by: ...
+     * (acquired at ... by thread ..., held <n>ms, owner=...)} / {@code lock currently
+     * free}——「等待期间卡顿已自愈释放」的直接证据形态不变）。
      */
     String lockHolderSnapshot() {
-        lock.lock();
-        try {
-            return lockHolderSnapshotLocked();
-        } finally {
-            lock.unlock();
-        }
+        return connectionExecutor.lockHolderSnapshot();
     }
 
     /**
-     * 持锁者真相快照（须在已持有 {@code lock} 的临界区内调用，无锁内自取的加锁开销）：
-     * Acquire timeout / 慢持锁打点 / 轮询弃轮三类源侧日志共用同一形态（对齐 serial 版
-     * {@code lock currently held by: ... (acquired at ... by thread ...)} 样板，补已持
-     * 时长与 owner 业务身份两字段）。
+     * 红测注入口：缩短 HELD hold deadline（旧「幽灵锁收割阈值」测试缝，语义迁移为
+     * 执行者持有超时强制收场阈值；仅同包测试使用，生产用默认 5 分钟）。
      */
-    private String lockHolderSnapshotLocked() {
-        if (currentKey == null) {
-            return "lock currently free";
+    void setGhostReapThresholdMsForTest(long thresholdMs) {
+        if (thresholdMs <= 0) {
+            throw new IllegalArgumentException("ghostReapThresholdMs must be > 0, got: " + thresholdMs);
         }
-        long heldMs = lockAcquireTime > 0 ? System.currentTimeMillis() - lockAcquireTime : -1;
-        return "lock currently held by: " + currentKey
-                + " (acquired at " + lockAcquireTime + " by thread " + lockAcquireThread
-                + ", held " + heldMs + "ms, owner=" + ownerIdentity(lockAcquireOwner) + ")";
-    }
-
-    /** owner 业务身份短串（null=无主事务；类型化/LEGACY 均以 ownerKey 全字段呈现）。 */
-    private static String ownerIdentity(ResourceOwner owner) {
-        return owner == null ? "none" : owner.ownerKey();
-    }
-
-    private String generateRequestKey() {
-        // 生成唯一请求标识（示例：时间戳+线程ID）
-        return System.currentTimeMillis() + "-" + Thread.currentThread().getId();
-    }
-
-    /**
-     * 幽灵锁收割（Q-1/Q-2 二轮根因修复，与 serial SerialSourcePort 同型）：事务级硬超时
-     * 保证 release 必执行，但 release 的执行链可能整体丢失（计时任务入队被拒、持有线程被
-     * master.send 无界等待永久吸收等）——currentKey 成永久幽灵锁，后续 acquire 只能超时，
-     * 源永久瘫痪（live 实证）。acquire 入口与 forceRecoverTransport 双点检查：持锁时长超过
-     * {@link #ghostReapThresholdMs} 即按 release 同一状态机强制清零 + signal 等待者。
-     * 必须在已持有 {@code lock} 的临界区内调用。
-     *
-     * @param trigger 触发点标识（日志定位用：acquire / transport-wedge-recovery）
-     */
-    private void reapGhostLockIfStale(String trigger) {
-        if (currentKey == null || lockAcquireTime <= 0) {
-            return;
-        }
-        long heldMs = System.currentTimeMillis() - lockAcquireTime;
-        if (heldMs <= ghostReapThresholdMs) {
-            return;
-        }
-        log.error("[MODBUS-GHOST-LOCK-REAPED] trigger={}, 幽灵锁持锁 {}ms 超阈值 {}ms（持锁 key={}, 持锁线程={}），"
-                        + "按 release 同一状态机强制清零，等待者 {} 个被唤醒, modbusInfo: {}",
-                trigger, heldMs, ghostReapThresholdMs, currentKey, lockAcquireThread, waitQueue.size(), modbusInfo);
-        // 与 release() 完全一致的状态清零 + 唤醒（同一状态机，无双路径漂移）
-        currentKey = null;
-        lockAcquireTime = 0;
-        lockAcquireThread = null;
-        lockAcquireOwner = null;
-        if (!waitQueue.isEmpty()) {
-            condition.signal();
-        }
+        connectionExecutor.setHoldDeadlineMsForTest(thresholdMs);
     }
 
     private void openModbus() {
@@ -989,9 +697,12 @@ public class ModbusSource {
      * <p>IO 旁池（R3 期 4）不随单源关停：池归 ModbusIntegration 生命周期管理
      * （onInit 初始化 / onRelease 在全部源销毁后统一 shutdown），在途 send 自然跑完；
      * 死源语义由 destroyed 标志表达（见 {@link #isModbusOpen()}）。
+     * 连接执行者 {@code markClosed}：空闲线程退出防源销毁后线程滞留（非拒绝态——
+     * 销毁后帧/授予行为不变，见执行者类注「无 CLOSED」）。
      */
     protected void destroyResources() {
         ModbusMasterFactory.destroyMaster(modbusMaster);
+        connectionExecutor.markClosed();
         destroyed = true; // 死源显式标志（isModbusOpen 防线，见下）
     }
 
@@ -1003,6 +714,10 @@ public class ModbusSource {
      * （TCP socket / RTU 串口 fd），使阻塞 IO 立即异常返回、车道线程得救；
      * keepAlive（TCP）/每事务重开（RTU）的既有路径在下一事务自动重建连接。
      * 实现委托 {@link ModbusMasterFactory#forceRecover(ModbusMaster, String)}。
+     *
+     * <p>调用面：策略层事务硬超时/apply 看门狗（经 IO 池卸载）+ 连接执行者帧 deadline
+     * （同卸载形态）——旧「此处收割幽灵锁」段随锁机制退役：HELD 持有超时由执行者
+     * hold deadline 强制收场，无逻辑锁可幽灵化。
      *
      * @param reason 触发原因（日志定位用，如 transaction-hard-timeout）
      */
@@ -1016,15 +731,6 @@ public class ModbusSource {
             return;
         }
         log.error("[MODBUS-WEDGE-RECOVERY] 强拆挂死传输, 原因: {}, modbusInfo: {}", reason, modbusInfo);
-        // Q-1/Q-2 二轮：强拆传输只救 socket/fd，不清逻辑锁——若 currentKey 已成幽灵
-        //（release 链整体丢失），下一个 acquire 仍撞同一把逻辑锁，恢复循环不收敛。
-        // 此处按持锁时长阈值强制清锁（与 acquire 入口同一收割状态机）。
-        lock.lock();
-        try {
-            reapGhostLockIfStale("transport-wedge-recovery");
-        } finally {
-            lock.unlock();
-        }
         ModbusMasterFactory.forceRecover(master, reason);
     }
 
@@ -1045,7 +751,7 @@ public class ModbusSource {
      * @return
      */
     public int getWaitingCount() {
-        return waitQueue.size();
+        return connectionExecutor.getWaitingCount();
     }
 
 
