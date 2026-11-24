@@ -274,8 +274,9 @@ public class ModbusConnectionExecutorContractTest {
         String ghost = executor.acquire(null, 5_000);
         assertNotNull("前置：持有者取得连接", ghost);
 
-        // 持有者永不 release；hold deadline（100ms）后执行者强制收场
-        Thread.sleep(300);
+        // 持有者永不 release；hold deadline（100ms）到点执行者强制收场。收场已发生的
+        // 确定性信号=排队者被授予（授予前提 currentHeld==null 只能由强制收场达成；
+        // 排队预算 5s 远大于阈值，收场迟到只会推迟授予不会翻红）——不用固定 sleep 猜相位
         String revived = executor.acquireAsync(OWNER_B, 5_000).get(5, TimeUnit.SECONDS);
         assertNotNull("超时强制收场后连接应恢复授予", revived);
         assertFalse("旧 key 的迟到 release 无效", executor.release(ghost));

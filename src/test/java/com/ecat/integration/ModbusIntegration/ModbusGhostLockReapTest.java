@@ -5,7 +5,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
@@ -27,7 +26,6 @@ import org.junit.Test;
 public class ModbusGhostLockReapTest {
 
     private static final long REAP_THRESHOLD_MS = 100;
-    private static final long CROSS_THRESHOLD_WAIT_MS = 300;
     private static final long ACQUIRE_TIMEOUT_MS = 500;
 
     private ModbusSource newSource() {
@@ -47,9 +45,9 @@ public class ModbusGhostLockReapTest {
         String ghostKey = source.acquire(ACQUIRE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         assertNotNull("首次 acquire 应成功取得锁", ghostKey);
 
-        // 定时等待跨过收割阈值（latch 永不 countDown，await 到点返回 false 属预期，取墙钟推进语义）
-        new CountDownLatch(1).await(CROSS_THRESHOLD_WAIT_MS, TimeUnit.MILLISECONDS);
-
+        // 不固定等待跨阈值：收割已发生的确定性信号=排队者被授予（授予前提
+        // currentHeld==null 只能由 hold deadline 强制收场达成；排队预算 500ms 远大于
+        // 100ms 阈值，收场迟到只会推迟授予不会翻红）
         String revived = source.acquire(ACQUIRE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         assertNotNull("幽灵锁应被收割，后续 acquire 应立即可得（修复前此处为 null = 红）", revived);
 

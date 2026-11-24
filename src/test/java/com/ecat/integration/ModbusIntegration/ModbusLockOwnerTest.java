@@ -8,7 +8,6 @@ import static org.mockito.Mockito.mock;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
@@ -127,10 +126,12 @@ public class ModbusLockOwnerTest {
 
         String key1 = source.acquire(deviceOwner("entry-1", "dev-stale"));
         assertNotNull(key1);
-        // 越过收割阈值（墙钟等待为阈值粒度所限的下限，非同步手段；闩永不释放，仅借其超时）
-        new CountDownLatch(1).await(300, TimeUnit.MILLISECONDS);
-
-        String key2 = source.acquire(deviceOwner("entry-1", "dev-fresh"));
+        // 不固定等待跨阈值：收割已发生的确定性信号=排队者被授予（授予前提
+        // currentHeld==null 只能由 hold deadline 强制收场达成）。排队预算须显式大于
+        // 阈值——bareSource 默认 waitTimeoutMs=100 与阈值同宽会打成平手，2000ms 下
+        // 收场迟到只会推迟授予不会翻红
+        String key2 = source.acquire(2000, TimeUnit.MILLISECONDS,
+                deviceOwner("entry-1", "dev-fresh"));
         assertNotNull("幽灵锁被收割，新事务可授予", key2);
         assertEquals("收割清掉旧 owner，登记的是新事务自己的 owner",
                 deviceOwner("entry-1", "dev-fresh"), source.getLockAcquireOwner());

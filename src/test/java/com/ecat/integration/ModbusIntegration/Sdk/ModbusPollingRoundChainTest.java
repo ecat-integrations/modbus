@@ -80,6 +80,23 @@ public class ModbusPollingRoundChainTest {
         }
     }
 
+    /**
+     * 排队等待者已清空事件等待（deadline 轮询，超时即失败）：调用方超时弃权经执行者
+     * Abandon 事件异步摘除（离队在执行者线程单点收敛，与调用方返回有 µs 级滞后）。
+     * maxWaiters=1 的源上，摘除未落账时紧随的 acquire 会被队满快拒（REE 即返 null、
+     * 不进等待预算）——断言「锁恢复可得」前必须先受控该前置，否则断的是调度运气
+     * （同 ModbusSourceTest#testGetWaitingCount 的 drain-wait 先例）。
+     */
+    private void awaitWaitingCountDrained(ModbusSource source) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (source.getWaitingCount() > 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("超时弃权者未被执行者摘除（waitingCount 未归零）: "
+                        + source.getWaitingCount());
+            }
+        }
+    }
+
     // ==================== 修复主断言：段间留隙在锁外 ====================
 
     /**
@@ -146,9 +163,10 @@ public class ModbusPollingRoundChainTest {
         timers.fire(0); // 段体同步完成、round 在 1s delay 上挂起——事务在飞、锁持有
         String writerKey = source.acquire(200, TimeUnit.MILLISECONDS);
         assertNull("单事务 round 的体内留隙在锁内（对照契约：写者此窗不可得锁）", writerKey);
+        awaitWaitingCountDrained(source); // 弃权摘除落账后再推进（maxWaiters=1：残槽会让下一步被队满快拒）
 
         timers.fire(1); // delay 到点 → 段体收尾 → 释放 → 下一拍重排，全部同步落定
-        awaitShotCount(2);
+        awaitShotCount(3); // fire(0) 后已有触发拍+delay 拍两条；结算重排的下一拍=第 3 条（release 先于重排，计数到即释放已落账）
         String writerKeyAfter = source.acquire(200, TimeUnit.MILLISECONDS);
         assertNotNull("轮结算释放后写者恢复可取锁", writerKeyAfter);
         assertTrue(source.release(writerKeyAfter));
