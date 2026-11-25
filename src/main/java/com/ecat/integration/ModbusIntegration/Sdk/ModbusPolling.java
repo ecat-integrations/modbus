@@ -5,8 +5,10 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -41,6 +43,13 @@ import com.ecat.integration.ModbusIntegration.ModbusTransactionStrategy;
  * <p><b>round 契约</b>：{@code Function<ModbusSource, CompletableFuture<Boolean>>}——入参是
  * 已持锁的 source（事务体与既有 executePolling lambda 同签名，迁移=搬函数体）；
  * Boolean=本轮业务成功（false 触发统一 warn），异常=传输错误（统一 error）。
+ *
+ * <p><b>启动序列 startup（可选）</b>：上电默认写等一次性初始化用
+ * {@link #startup(Function)} 声明——首轮读之前在源锁事务入口（写命令同一条对话队列）
+ * 顺序执行一次，成功后周期链才起（先初始化再周期读，同队列无竞态）；SDK 统一承载
+ * attempts×retryDelay 重试，全部尝试失败 ⇒ 轮询不启动 + 句柄失败态 +
+ * {@link #onStartupFailure} 回调；startup 链随句柄 cancel（宿主移除 sweep）收口。
+ * 详见 {@link #startup(Function)}。
  *
  * <p><b>round 适用边界（避坑）</b>：round() 只承载「一次轮询、过程中无等待、无分段
  * 交互」的单段事务——体内零 delay 的纯读链（thenCompose/allOf 串联、毫秒级完成）仍是
@@ -81,6 +90,12 @@ public final class ModbusPolling {
 
     private static final Log log = LogFactory.getLogger(ModbusPolling.class);
 
+    /** startup 默认总尝试次数（含首发）：校准自首个消费方 tianhong 既有消费面（3 次/2s）。 */
+    static final int DEFAULT_STARTUP_ATTEMPTS = 3;
+
+    /** startup 默认重试间隔（毫秒）：同 tianhong 既有量级——错开共享口上的读轮节拍。 */
+    static final long DEFAULT_STARTUP_RETRY_DELAY_MS = 2000L;
+
     /** 宿主设备（必填）：start() 时把轮询 cancel 注册进宿主移除动作（18 号 §3.3 SDK 内绑）。 */
     private final RemovalHost host;
     private final ModbusSource source;
@@ -101,6 +116,20 @@ public final class ModbusPolling {
     private List<Long> chainGaps;
     /** roundChain() 已起建标志（段尚未声明也锁定与 round() 的互斥——声明不得半途换轨）。 */
     private boolean chainDeclared;
+    /**
+     * 启动序列（可选，声明一次）：首轮读之前在源锁事务入口
+     * （{@link ModbusTransactionStrategy#executeWithLambda}——写命令同一条对话队列、HIGH
+     * 优先级）顺序执行一次的一次性初始化体。与轮询的竞态由结构消除（startup 先行、
+     * 周期链后起——同源串行），设备不再用 delay+自重试赌运气
+     * （bug-record-20261124-214200 定谳的 SDK 侧修复：tianhong 上电默认写 3 次全输形态）。
+     */
+    private Function<ModbusSource, CompletableFuture<Boolean>> startup;
+    /** startup 总尝试次数（含首发；默认档校准自首个消费方 tianhong 的 3 次）。 */
+    private int startupAttempts = DEFAULT_STARTUP_ATTEMPTS;
+    /** startup 重试间隔毫秒（默认档同 tianhong 既有 2s——错开共享口上的读轮节拍）。 */
+    private long startupRetryDelayMs = DEFAULT_STARTUP_RETRY_DELAY_MS;
+    /** startup 全部尝试失败的观测回调（可选）：设备用于标记属性故障态。 */
+    private Consumer<Throwable> onStartupFailure;
     /** 周期（必选，毫秒，正数）。 */
     private long periodMs = -1L;
     /** 首轮延迟（毫秒，默认 0——立即发起首轮）。 */
@@ -292,6 +321,77 @@ public final class ModbusPolling {
     }
 
     /**
+     * 声明启动序列（可选）：首轮读之前在源锁事务入口顺序执行一次的一次性初始化体
+     * （上电默认写、一次性配置下发等形态）。默认档 {@link #DEFAULT_STARTUP_ATTEMPTS}
+     * 次 / {@link #DEFAULT_STARTUP_RETRY_DELAY_MS}ms（校准自 tianhong 既有消费面）；
+     * 需要显式配档用 {@link #startup(Function, int, long)}。声明后
+     * {@link #start()} 的语义变为「startup 先行、成功后周期链才起」：
+     * <pre>{@code
+     * ModbusPolling.on(this, modbusSource)
+     *         .startup(src -> writeDefaults(src))             // 首轮读之前在口上顺序执行一次
+     *         .onStartupFailure(ex -> markAttrsFaulty(ex))    // 可选：全部尝试失败时标属性故障
+     *         .round(this::readAndUpdate)
+     *         .every(5, TimeUnit.SECONDS)
+     *         .start();
+     * }</pre>
+     *
+     * <p><b>无竞态原理</b>：startup 与轮询走同一条源锁对话队列（写命令同入口
+     * executeWithLambda），且周期链在 startup 成功前不起——不存在「写与读抢口」的并发窗，
+     * 不需要设备侧重试循环。重试由 SDK 统一承载：单次尝试业务 FALSE（round 契约同义）或
+     * 异常完成（取锁失败/传输错误）均折算为可重试失败，间隔 retryDelayMs 再试；全部
+     * 尝试耗尽 ⇒ 轮询不启动、句柄置失败态（{@link PollingHandle#isStartupFailed()}）、
+     * {@link #onStartupFailure} 回调（严格模式：不吞异常、不静默起轮）。startup 链随
+     * {@link PollingHandle#cancel()}（宿主移除 sweep 内绑）一起取消——entry 移除时在飞
+     * startup/待发重试全部收口，无孤儿链。
+     *
+     * <p>startup 体契约与 round 一致（{@code Function<ModbusSource, CompletableFuture<Boolean>>}，
+     * 入参=已持锁 source，Boolean=业务成功，异常=失败）；单个体内是完整的一次源锁事务，
+     * 体内不留 delay（多步写用 thenCompose 串联，同 round 单事务形态）。
+     */
+    public ModbusPolling startup(Function<ModbusSource, CompletableFuture<Boolean>> startup) {
+        return startup(startup, DEFAULT_STARTUP_ATTEMPTS, DEFAULT_STARTUP_RETRY_DELAY_MS);
+    }
+
+    /**
+     * 声明启动序列（显式配档）：{@code attempts} 为总尝试次数（含首发，须 &gt;= 1），
+     * {@code retryDelayMs} 为相邻尝试间隔毫秒（须 &gt;= 0）。语义见
+     * {@link #startup(Function)}。
+     */
+    public ModbusPolling startup(Function<ModbusSource, CompletableFuture<Boolean>> startup,
+            int attempts, long retryDelayMs) {
+        if (startup == null) {
+            throw new IllegalArgumentException("startup(null) 不允许");
+        }
+        if (this.startup != null) {
+            throw new IllegalStateException("startup 已声明过（一次性启动序列只能有一个定义）");
+        }
+        if (attempts < 1) {
+            throw new IllegalArgumentException("startup attempts 须 >= 1（至少首发一次）: " + attempts);
+        }
+        if (retryDelayMs < 0) {
+            throw new IllegalArgumentException("startup retryDelayMs 须 >= 0: " + retryDelayMs);
+        }
+        this.startup = startup;
+        this.startupAttempts = attempts;
+        this.startupRetryDelayMs = retryDelayMs;
+        return this;
+    }
+
+    /**
+     * startup 全部尝试失败回调（可选）：收到末次失败根因（业务 FALSE 收尾时为描述性
+     * {@link IllegalStateException}，消息含尝试次数）。设备用于标记属性故障态。
+     * cancel 不触发本回调（主动停机非故障）。观测与主链正交：回调抛异常只记 warn，
+     * 不影响失败终态记账（同 onRound 观察者隔离语义）。
+     */
+    public ModbusPolling onStartupFailure(Consumer<Throwable> onStartupFailure) {
+        if (onStartupFailure == null) {
+            throw new IllegalArgumentException("onStartupFailure(null) 不允许");
+        }
+        this.onStartupFailure = onStartupFailure;
+        return this;
+    }
+
+    /**
      * 到点单发糖（B 族收编备用）：{@code ms} 毫秒后正常完成的 {@link CompletableFuture}，
      * 经域自持定时器提交（MDC 传播内置）。只用于锁外的一次性到点延迟（如 start 序列里
      * 两条命令之间的节拍）。
@@ -355,27 +455,130 @@ public final class ModbusPolling {
         if (periodMs <= 0) {
             throw new IllegalStateException("ModbusPolling.start() 前必须声明 every(period, unit)（多久一轮）");
         }
+        if (startup == null) {
+            // 存量路径（无 startup，零变化）：起链即入网
+            PeriodicChain chain = newPeriodicChain();
+            PollingHandle handle = new Handle(chain);
+            // SDK 内绑宿主生命周期（18 号 §3.3）：设备移除 sweep 执行本动作即停轮询；
+            // cancel 纯标记不中断在飞事务（非阻塞契约），幂等与 sweep 二次调用天然兼容
+            host.onRemove(handle::cancel);
+            log.info("ModbusPolling 启动: {}, period: {}ms, mode: {}, 轮体: {}", label(), periodMs,
+                    fixedRate ? "fixedRate" : "fixedDelay",
+                    chainSegments != null ? "roundChain×" + chainSegments.size() : "round");
+            return handle;
+        }
+        // startup 路径：startup 序列先行（成功后周期链才起），句柄先绑宿主生命周期——
+        // startup 在飞/重试待发期间 entry 移除的 sweep 即刻收口（无孤儿链）
+        Handle handle = new Handle();
+        host.onRemove(handle::cancel);
+        // 首发拍经域定时器单发（延迟 0 立即发起）：executeWithLambda 取锁可阻塞（等锁预算
+        // 内），不占 start() 调用线程（设备生命周期线程禁 park）；MDC 在提交线程捕获
+        // （scope 注入设备三键，startup 体与 round 体同源归属）
+        try (DeviceMdcContext.Scope deviceScope = DeviceMdcContext.scopeOf(host)) {
+            handle.trackPending(ModbusSdkTimers.fireAfter(() -> attemptStartup(handle, 1), 0L));
+        }
+        log.info("ModbusPolling 启动（startup 先行）: {}, attempts: {}, retryDelay: {}ms, period: {}ms,"
+                        + " mode: {}, 轮体: {}", label(), startupAttempts, startupRetryDelayMs, periodMs,
+                fixedRate ? "fixedRate" : "fixedDelay",
+                chainSegments != null ? "roundChain×" + chainSegments.size() : "round");
+        return handle;
+    }
+
+    /**
+     * 周期链接体（存量路径与 startup 成功入网共用）：域自持定时 + 网格策略 + MDC scope 起链。
+     * 首发即发（默认 initialDelay=0；声明 D 则首拍与名义锚点都从 D 起算）；在已停机
+     * （终端态）的池上起链由 REE 显式上抛（调用方错误，严格模式）。设备归属注入（工单 G）：
+     * chain.start 捕获起链线程 MDC 全量快照逐轮恢复——scope 把宿主设备三键写入快照，
+     * 轮体→dispatchIo 逐帧捕获（ModbusSource 事务层 TX/RX 埋点）即携带设备归属（共享连接
+     * 多 slaveId 场景按发起设备逐帧归属），非设备宿主（测试假宿主）no-op。
+     */
+    private PeriodicChain newPeriodicChain() {
         PeriodicRunner runner = ModbusSdkTimers.runner();
         ModbusPollingSchedule schedule = fixedRate
                 ? ModbusPollingSchedule.fixedRate(periodMs, initialDelayMs, nanoClock, label())
                 : ModbusPollingSchedule.fixedDelay(periodMs, initialDelayMs, nanoClock, label());
-        // 首发即发（默认 initialDelay=0；声明 D 则首拍与名义锚点都从 D 起算）；
-        // 在已停机（终端态）的池上起链由 REE 显式上抛（调用方错误，严格模式）。
-        // 设备归属注入（工单 G）：chain.start 捕获起链线程 MDC 全量快照逐轮恢复——scope 把宿主
-        // 设备三键写入快照，轮体→dispatchIo 逐帧捕获（ModbusSource 事务层 TX/RX 埋点）即携带
-        // 设备归属（共享连接多 slaveId 场景按发起设备逐帧归属），非设备宿主（测试假宿主）no-op
-        PeriodicChain chain;
         try (DeviceMdcContext.Scope deviceScope = DeviceMdcContext.scopeOf(host)) {
-            chain = runner.periodic(label(), this::runRound, schedule).start();
+            return runner.periodic(label(), this::runRound, schedule).start();
         }
-        PollingHandle handle = new Handle(chain);
-        // SDK 内绑宿主生命周期（18 号 §3.3）：设备移除 sweep 执行本动作即停轮询；
-        // cancel 纯标记不中断在飞事务（非阻塞契约），幂等与 sweep 二次调用天然兼容
-        host.onRemove(handle::cancel);
-        log.info("ModbusPolling 启动: {}, period: {}ms, mode: {}, 轮体: {}", label(), periodMs,
-                fixedRate ? "fixedRate" : "fixedDelay",
-                chainSegments != null ? "roundChain×" + chainSegments.size() : "round");
-        return handle;
+    }
+
+    /**
+     * startup 单次尝试 + 结算（SDK 定时线程/事务完成线程执行）：经
+     * {@link ModbusTransactionStrategy#executeWithLambda} 走源锁事务入口（写命令同一条
+     * 对话队列、HIGH 优先级——与轮询轮体的 executePolling 同源串行，无竞态窗）；周期链
+     * 在成功前不起，成功入网后 startup 与轮次的先后由链结构保证。
+     *
+     * <p>结算分路：成功 → 周期链接体入网（首轮拍 immediate）；可重试失败（业务 FALSE /
+     * 异常完成同格折算——round 契约语义）→ retryDelayMs 后重试（attempts 上限内）；
+     * 耗尽 → {@link #finishStartupFailure} 终态失败（轮询永不启动）。cancel 先行的在飞
+     * 尝试：结果被丢弃（无重试拍、无入网、无失败回调——主动停机非故障）。
+     */
+    private void attemptStartup(Handle handle, int attempt) {
+        if (handle.isCancelled()) {
+            return;
+        }
+        CompletableFuture<Boolean> attemptFuture;
+        try {
+            attemptFuture = ModbusTransactionStrategy.executeWithLambda(source, startup);
+        } catch (RuntimeException submissionFailure) {
+            // 提交面同步异常折算可重试失败（与取锁失败同格）：折算后必达「重试」或
+            // 「终态失败」两路之一，不静默吞（严格模式）
+            CompletableFuture<Boolean> failed = new CompletableFuture<>();
+            failed.completeExceptionally(submissionFailure);
+            attemptFuture = failed;
+        }
+        attemptFuture.handle((ok, error) -> {
+            if (handle.isCancelled()) {
+                return null;
+            }
+            if (error == null && Boolean.TRUE.equals(ok)) {
+                log.info("ModbusPolling startup 完成（第 {}/{} 次尝试）: {}", attempt, startupAttempts,
+                        label());
+                handle.attachChain(newPeriodicChain());
+                log.info("ModbusPolling 启动: {}, period: {}ms, mode: {}, 轮体: {}", label(), periodMs,
+                        fixedRate ? "fixedRate" : "fixedDelay",
+                        chainSegments != null ? "roundChain×" + chainSegments.size() : "round");
+                return null;
+            }
+            Throwable root = error != null ? rootOf(error) : null;
+            log.warn("ModbusPolling startup 第 {}/{} 次尝试失败: {}", attempt, startupAttempts,
+                    root != null ? root.getMessage() : "业务返回 false");
+            if (attempt >= startupAttempts) {
+                finishStartupFailure(handle, root);
+                return null;
+            }
+            // 重试拍经域定时器单发：完成线程 MDC 不确定（事务完成可能在 IO 旁池线程），
+            // scope 显式注入设备三键——重试体与首发体同源归属
+            try (DeviceMdcContext.Scope deviceScope = DeviceMdcContext.scopeOf(host)) {
+                handle.trackPending(ModbusSdkTimers.fireAfter(
+                        () -> attemptStartup(handle, attempt + 1), startupRetryDelayMs));
+            }
+            return null;
+        });
+    }
+
+    /**
+     * startup 耗尽终态：句柄置失败态（轮询永不启动）、失败回调通知（严格模式：不吞异常、
+     * 不静默起轮）。业务 FALSE 收尾时根因为描述性 {@link IllegalStateException}（无异常
+     * 可携带，消息含尝试次数与收尾形态）。回调观测面隔离同 onRound：抛异常只记 warn，
+     * 不影响失败终态记账。
+     */
+    private void finishStartupFailure(Handle handle, Throwable lastRoot) {
+        Throwable cause = lastRoot != null ? lastRoot
+                : new IllegalStateException("startup 全部 " + startupAttempts
+                        + " 次尝试失败（末次业务返回 false）");
+        handle.markStartupFailed();
+        log.error("ModbusPolling startup 全部 {} 次尝试失败，轮询不启动（终端态）: {}",
+                startupAttempts, label(), cause);
+        Consumer<Throwable> observer = this.onStartupFailure;
+        if (observer != null) {
+            try {
+                observer.accept(cause);
+            } catch (RuntimeException observerFailure) {
+                log.warn("ModbusPolling onStartupFailure 观察者异常（已隔离，不影响失败终态）: "
+                        + label(), observerFailure);
+            }
+        }
     }
 
     /**
@@ -520,24 +723,90 @@ public final class ModbusPolling {
         return cur;
     }
 
-    /** {@link PollingHandle} 实现：包装 core 周期链句柄（链语义透传，不二次包装）。 */
+    /** {@link PollingHandle} 实现：包装 core 周期链句柄（链语义透传）+ startup 阶段状态机
+     * （STARTUP 在飞 → RUNNING 入网 / FAILED 耗尽终态；cancel 为第四终态，非失败）。 */
     private final class Handle implements PollingHandle {
 
-        private final PeriodicChain chain;
+        /** 周期链句柄：startup 成功入网前为 null（存量路径构造即在网）。 */
+        private volatile PeriodicChain chain;
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private volatile boolean startupFailed;
+        /** startup 阶段待发拍（首发/重试）；入网后不再使用（cancel 走链收口）。 */
+        private volatile ScheduledFuture<?> pendingStartupShot;
 
+        /** 存量路径：无 startup，构造即在网。 */
         Handle(PeriodicChain chain) {
             this.chain = chain;
         }
 
+        /** startup 路径：startup 序列先行，成功后入网。 */
+        Handle() {
+        }
+
+        /**
+         * 登记 startup 阶段待发拍（首发/重试）：先登记后查标志收口 cancel 竞态
+         * （cancel 先行则当场撤销——与 core PeriodicChain.trackPending 同型）。
+         */
+        synchronized void trackPending(ScheduledFuture<?> shot) {
+            this.pendingStartupShot = shot;
+            if (cancelled.get()) {
+                shot.cancel(false);
+            }
+        }
+
+        /**
+         * startup 成功入网（与 cancel 互斥收口竞态：cancel 先行则链当场撤销——不留
+         * 「已取消句柄下的活链」孤儿）。
+         */
+        synchronized void attachChain(PeriodicChain attached) {
+            this.chain = attached;
+            this.pendingStartupShot = null;
+            if (cancelled.get()) {
+                attached.cancel();
+            }
+        }
+
+        synchronized void markStartupFailed() {
+            this.startupFailed = true;
+        }
+
+        /** cancel 已发生（startup 结算侧丢弃在飞结果的判据）。 */
+        boolean isCancelled() {
+            return cancelled.get();
+        }
+
         @Override
-        public void cancel() {
-            // 不中断线程：在飞事务 CF 自行完成并释放源锁（IO 旁池线程归旁池管）
-            chain.cancel();
+        public synchronized void cancel() {
+            // 不中断线程：在飞事务 CF 自行完成并释放源锁（IO 旁池线程归旁池管）；
+            // startup 阶段撤待发拍（在飞尝试的结果由结算侧 cancelled 检查丢弃），
+            // 入网后走链收口（撤下一拍，永不注销的链对 cancel 幂等）
+            if (!cancelled.compareAndSet(false, true)) {
+                return;
+            }
+            PeriodicChain current = chain;
+            if (current != null) {
+                current.cancel();
+            } else {
+                ScheduledFuture<?> pending = pendingStartupShot;
+                if (pending != null) {
+                    pending.cancel(false);
+                }
+            }
         }
 
         @Override
         public boolean isRunning() {
-            return chain.isRunning();
+            if (cancelled.get() || startupFailed) {
+                return false;
+            }
+            PeriodicChain current = chain;
+            // startup 在飞（chain==null）：生命周期已激活、待入网——按存活口径
+            return current == null || current.isRunning();
+        }
+
+        @Override
+        public boolean isStartupFailed() {
+            return startupFailed;
         }
 
         @Override
