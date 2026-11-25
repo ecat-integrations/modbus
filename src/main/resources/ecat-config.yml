@@ -7,4 +7,4 @@ dependencies:
     version: ^4.0.0
   - artifactId: integration-serial
     groupId: com.ecat
-    version: ^4.0.0
+    version: ^5.0.0
